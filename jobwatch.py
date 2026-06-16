@@ -2,7 +2,7 @@
 """
 jobwatch.py - watcher for 2026 Fall intern / new-grad / entry-level roles
 
-monitoring sources:
+监控来源:
   - Greenhouse (public JSON API, most reliable)
   - Lever     (public JSON API, most reliable)
   - Workday   (per-company subdomain, configure individually)
@@ -18,6 +18,7 @@ Deps: pip install requests beautifulsoup4 lxml
 import json
 import os
 import re
+import sys
 import time
 import hashlib
 import sqlite3
@@ -52,6 +53,26 @@ EXCLUDE = ["phd only"]
 #   "strict" = must be a target role AND mention 2026/fall
 #   "loose"  = target role and not tagged as another term (best early in the cycle)
 FILTER_MODE = "loose"
+
+# --- Freshness (alert mode) ---
+# This is the core of "notify me about jobs posted in the last ~30 min".
+# Each run, only notify about jobs whose POSTING TIME falls within this window.
+# Set it a bit LARGER than your cron interval so a delayed run (GitHub's free
+# scheduler can lag a few min) doesn't miss postings. E.g. cron every 30 min ->
+# window 45 min gives 15 min of slack. The dedup DB still prevents repeats, so
+# a little overlap just means "no duplicates", never "spam".
+ALERT_WINDOW_MINUTES = 45
+# Jobs with NO known posting time (some sources don't expose it): you can't
+# window-filter these, so decide what to do. True = notify on first sight only
+# (dedup stops repeats). False = ignore undated jobs entirely (stricter; means
+# you might miss a few postings whose source hides the date).
+ALERT_INCLUDE_UNKNOWN_DATE = True
+
+# --- Daily digest ---
+# A separate "digest" run (meant for ~midnight) summarizes everything posted
+# during the day, regardless of whether it was already alerted. It does NOT
+# touch the dedup DB, so it never interferes with alert mode.
+DIGEST_LOOKBACK_HOURS = 24
 
 # --- Location filter ---
 # Two modes:
@@ -460,17 +481,19 @@ def notify_telegram(text):
 
 def notify_discord(blocks, header):
     """Send to a Discord webhook. blocks = list of per-job text chunks.
-    Discord caps each message at 2000 chars, so we batch blocks under that."""
+    Discord caps each message at 2000 chars, so we batch blocks under that.
+    Jobs are separated by a blank line for readability."""
     if not DISCORD_WEBHOOK:
         print("[discord] DISCORD_WEBHOOK not set")
         return
     LIMIT = 1900  # leave headroom under Discord's 2000-char cap
+    SEP = "\n\n"
     batch, size = [header], len(header)
     def flush(b):
         if not b:
             return
         try:
-            r = requests.post(DISCORD_WEBHOOK, json={"content": "\n".join(b)},
+            r = requests.post(DISCORD_WEBHOOK, json={"content": SEP.join(b)},
                               timeout=TIMEOUT)
             if r.status_code not in (200, 204):
                 print(f"[discord] status {r.status_code}: {r.text[:120]}")
@@ -478,11 +501,11 @@ def notify_discord(blocks, header):
             print(f"[discord] {e}")
         time.sleep(0.7)  # stay under webhook rate limit
     for blk in blocks:
-        if size + len(blk) + 1 > LIMIT:
+        if size + len(blk) + len(SEP) > LIMIT:
             flush(batch)
             batch, size = [], 0
         batch.append(blk)
-        size += len(blk) + 1
+        size += len(blk) + len(SEP)
     flush(batch)
 
 def notify_email(text):
@@ -499,45 +522,54 @@ def notify_email(text):
     except Exception as e:
         print(f"[email] {e}")
 
-def send(jobs):
+def format_block(j):
+    """One job -> a compact, readable block (Discord markdown)."""
+    stamp, ago = humanize_age(j.get("posted_ts"))
+    title = j.get("title", "")
+    company = j.get("company", "")
+    # Line 1: bold title
+    line1 = f"**{title}**"
+    # Line 2: company · location · age
+    bits = []
+    if company:
+        bits.append(company)
+    if j.get("location"):
+        bits.append(f"📍 {j['location']}")
+    if ago:
+        bits.append(f"🕒 {ago}")
+    line2 = " · ".join(bits)
+    # Line 3: url
+    line3 = f"<{j['url']}>" if j.get("url") else ""
+    lines = [line1]
+    if line2:
+        lines.append(line2)
+    if line3:
+        lines.append(line3)
+    return "\n".join(lines)
+
+def send(jobs, header=None):
     if not jobs:
         return
-    # Newest first: jobs with a known posting time, most recent at top;
-    # unknown-time jobs go last.
+    # Newest first; unknown-time jobs go last.
     jobs = sorted(jobs, key=lambda j: j.get("posted_ts") or 0, reverse=True)
-    header = f"🔔 {len(jobs)} new jobs ({datetime.now():%m-%d %H:%M})\n"
-    blocks = []
-    for j in jobs:
-        stamp, ago = humanize_age(j.get("posted_ts"))
-        head = f"• {j['title']} @ {j['company']}"
-        if ago:
-            head += f"  🕒 {ago}"
-        parts = [head]
-        meta = []
-        if j.get("location"):
-            meta.append(f"📍 {j['location']}")
-        if stamp:
-            meta.append(f"posted {stamp}")
-        if meta:
-            parts.append("  " + " | ".join(meta))
-        parts.append(f"  {j['url']}")
-        blocks.append("\n".join(parts))
+    if header is None:
+        header = f"🔔 **{len(jobs)} new postings** · {datetime.now():%b %d %H:%M}"
+    blocks = [format_block(j) for j in jobs]
 
     if NOTIFY == "discord":
         notify_discord(blocks, header)
     elif NOTIFY == "telegram":
-        notify_telegram(header + "\n" + "\n\n".join(blocks))
+        notify_telegram(header + "\n\n" + "\n\n".join(blocks))
     elif NOTIFY == "email":
-        notify_email(header + "\n" + "\n\n".join(blocks))
+        notify_email(header + "\n\n" + "\n\n".join(blocks))
     else:
-        print(header + "\n" + "\n\n".join(blocks))
+        print(header + "\n\n" + "\n\n".join(blocks))
 
 # ============================================================
 # 6. Main
 # ============================================================
 
-def main():
-    con = db_init()
+def collect_all_jobs():
     all_jobs = []
     for fn in (fetch_greenhouse, fetch_lever, fetch_workday,
                fetch_community, fetch_linkedin):
@@ -546,16 +578,90 @@ def main():
         except Exception as e:
             print(f"[{fn.__name__}] {e}")
         time.sleep(1)  # be polite
+    return all_jobs
+
+def run_alert():
+    """Incremental mode: notify ONLY about jobs whose posting time falls within
+    the last ALERT_WINDOW_MINUTES. The dedup DB is a backstop against repeats.
+
+    Precision caveat: some sources (e.g. LinkedIn) only give a DATE, not a time,
+    so their timestamp is midnight of that day. We can't minute-window those, so
+    for date-only postings we fall back to "notify on first sight" (dedup), which
+    is the best available signal. Minute-precise sources use the real window."""
+    con = db_init()
+    all_jobs = collect_all_jobs()
+    now = time.time()
+    cutoff = now - ALERT_WINDOW_MINUTES * 60
+
+    def is_date_only(ts):
+        # midnight local time -> the source only gave us a date
+        dt = datetime.fromtimestamp(ts)
+        return dt.hour == 0 and dt.minute == 0 and dt.second == 0
 
     new_jobs = []
+    considered = 0
     for j in all_jobs:
+        ts = j.get("posted_ts")
+        if ts and not is_date_only(ts):
+            # minute-precise: strict window
+            if ts < cutoff:
+                continue
+            considered += 1
+        else:
+            # date-only or unknown: can't window it -> let dedup decide.
+            # Still drop clearly-old date-only postings (posted before today-1)
+            # so a brand-new empty DB doesn't flood on first run.
+            if ts and ts < now - 2 * 86400:
+                continue
+            if not ts and not ALERT_INCLUDE_UNKNOWN_DATE:
+                continue
+            considered += 1
+        # Backstop: skip anything we've already notified about.
         uid = make_uid(j["company"], j["title"], j["url"])
-        if is_new(con, uid):
-            new_jobs.append(j)
-            mark_seen(con, uid)
+        if not is_new(con, uid):
+            continue
+        new_jobs.append(j)
+        mark_seen(con, uid)
 
-    print(f"Fetched {len(all_jobs)} jobs, {len(new_jobs)} new")
+    print(f"Fetched {len(all_jobs)} jobs, {considered} eligible, "
+          f"{len(new_jobs)} new to notify")
     send(new_jobs)
+
+def run_digest():
+    """Daily mode (~midnight): summarize everything posted in the last
+    DIGEST_LOOKBACK_HOURS, regardless of prior alerts. Does NOT touch the DB."""
+    all_jobs = collect_all_jobs()
+    cutoff = time.time() - DIGEST_LOOKBACK_HOURS * 3600
+    # dedup within this run by uid (same posting from two sources)
+    seen, todays = set(), []
+    for j in all_jobs:
+        ts = j.get("posted_ts")
+        if not ts or ts < cutoff:
+            continue
+        uid = make_uid(j["company"], j["title"], j["url"])
+        if uid in seen:
+            continue
+        seen.add(uid)
+        todays.append(j)
+    n = len(todays)
+    header = (f"📊 **Daily digest** · {datetime.now():%b %d}\n"
+              f"{n} posting{'s' if n != 1 else ''} in the last "
+              f"{DIGEST_LOOKBACK_HOURS}h")
+    print(f"Digest: {n} jobs in last {DIGEST_LOOKBACK_HOURS}h")
+    if n:
+        send(todays, header=header)
+    elif NOTIFY == "discord" and DISCORD_WEBHOOK:
+        # still send a heartbeat so you know it ran
+        notify_discord([], header + "\n(nothing new today)")
+
+def main():
+    mode = "alert"
+    if "--digest" in sys.argv or os.environ.get("JOBWATCH_MODE") == "digest":
+        mode = "digest"
+    if mode == "digest":
+        run_digest()
+    else:
+        run_alert()
 
 if __name__ == "__main__":
     main()

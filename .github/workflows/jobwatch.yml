@@ -1,19 +1,25 @@
 name: jobwatch
 
-# Runs the job watcher on a schedule (and lets you trigger it manually).
 on:
   schedule:
-    # Every 30 minutes. GitHub cron is UTC; interval timing is what matters here.
-    # NOTE: scheduled runs on free GitHub can be delayed a few minutes at peak
-    # times — this is normal and not something you can pay your way out of here.
+    # ALERT mode — every 30 min. Pushes only fresh, not-yet-seen jobs.
+    # GitHub cron is UTC. Free-tier scheduled runs can be delayed a few minutes
+    # at peak times; that's normal and not fixable by paying here.
     - cron: "*/30 * * * *"
-  workflow_dispatch: {}   # manual "Run workflow" button
+    # DIGEST mode — once daily. 04:00 UTC = 00:00 Eastern (London, ON) in summer.
+    # In winter (EST, UTC-5) this lands at 23:00 the previous day; close enough.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        type: choice
+        options: [alert, digest]
+        default: alert
 
-# Allow the workflow to push the updated dedup DB back to the repo.
 permissions:
   contents: write
 
-# Never run two copies at once (they'd fight over the DB commit).
 concurrency:
   group: jobwatch
   cancel-in-progress: false
@@ -33,16 +39,31 @@ jobs:
       - name: Install dependencies
         run: pip install requests beautifulsoup4 lxml
 
-      - name: Run jobwatch
+      # Decide the mode:
+      #  - the 04:00 UTC schedule -> digest
+      #  - everything else (30-min schedule) -> alert
+      #  - manual run -> whatever you picked in the dropdown
+      - name: Determine mode
+        id: mode
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event.schedule }}" == "0 4 * * *" ]]; then
+            echo "mode=digest" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=alert" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run jobwatch (${{ steps.mode.outputs.mode }})
         env:
-          # From repo Settings -> Secrets and variables -> Actions
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          # Keep the dedup DB at the repo root so we can commit it back.
           JOBWATCH_DB: seen_jobs.db
+          JOBWATCH_MODE: ${{ steps.mode.outputs.mode }}
         run: python jobwatch.py
 
+      # Only alert mode changes the dedup DB. Digest never writes it, so this is
+      # a no-op on digest runs.
       - name: Persist dedup database
-        # Commit the updated DB so the next run remembers what it already sent.
         run: |
           if [[ -n "$(git status --porcelain seen_jobs.db)" ]]; then
             git config user.name "jobwatch-bot"
