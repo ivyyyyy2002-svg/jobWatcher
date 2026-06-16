@@ -19,6 +19,9 @@
 - 明确要求 Canadian citizenship 的岗位会跳过。
 - 硬性要求 French / bilingual French 的岗位会跳过。
 - 明确硬性限制明显不相关专业（如 accounting、nursing、mechanical/civil/chemical engineering 等）的岗位会跳过。
+- 来源包括公司 ATS（Greenhouse / Lever / Ashby / Workday）、社区聚合源、
+  LinkedIn 和 Indeed。查询词会覆盖 software、developer、co-op、data、QA、
+  cloud/devops/security、IT、technology analyst、junior/new grad 等方向。
 
 > 关于精度：能精确到分钟的来源（ATS / 社区源）就按"最近 N 分钟"窗口推，
 > 尽量做到一发布就提醒；LinkedIn 如果只给日期不给时间，没法证明它属于最近

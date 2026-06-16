@@ -127,7 +127,7 @@ COMMUNITY_MAX_AGE_DAYS = 14
 
 # --- Greenhouse: board token (the slug in the careers-page URL) ---
 # e.g. https://boards.greenhouse.io/stripe -> "stripe"
-# All slugs below were verified live. Empty ones cost nothing; trim as you like.
+# Some startup slugs may move or disappear; failures are logged and skipped.
 GREENHOUSE_COMPANIES = [
     "stripe", "databricks", "airbnb", "robinhood", "coinbase", "instacart",
     "samsara", "figma", "brex", "gusto", "flexport", "affirm", "reddit",
@@ -138,15 +138,42 @@ GREENHOUSE_COMPANIES = [
     "sigmacomputing", "mixpanel", "amplitude", "coursera", "khanacademy",
     "nubank", "adyen", "monzo", "n26", "gocardless", "betterment", "marqeta",
     "toast", "block", "project44", "phonepe", "groww", "postman",
+    "1password", "wealthsimple", "koho", "stackadapt", "benchscience",
+    "benchsci", "ecobee", "loopio", "vidyard", "applyboard", "clearco",
+    "klue", "wave", "freshbooks", "ramp", "rippling", "plaid", "notion",
+    "retool", "zapier", "segment", "hashicorp", "mongodb", "canva",
+    "miro", "loom", "linear", "mercury", "cashapp", "doordash",
+    "super", "coda", "intercom", "pleo", "bolt",
+    "checkout", "checkoutcom", "supabase", "huggingface",
+    "scaleai", "cohere", "wandb", "weightsandbiases",
 ]
 
 # --- Lever: same idea, fill in the company slug ---
 # e.g. https://jobs.lever.co/netflix -> "netflix"
-# All slugs below verified live.
+# Some slugs may move or disappear; failures are logged and skipped.
 LEVER_COMPANIES = [
     "palantir", "spotify", "mistral", "shieldai", "matchgroup",
     "outreach", "highspot", "people-ai", "tala", "wealthfront",
     "alloy", "velo3d", "whoop", "15five", "angellist",
+    "wealthsimple", "shopify", "ecobee", "clearco", "borrowell",
+    "ada", "humi", "miovision", "geotab", "mappedin", "koho",
+    "stackadapt", "loopio", "vidyard", "applyboard", "league",
+    "pointclickcare", "automattic", "zapier", "gitlab", "mongodb",
+    "cockroachlabs", "grafana", "sentry", "launchdarkly", "posthog",
+    "sourcegraph", "mattermost", "webflow", "rippling", "ramp",
+    "mercury", "brex", "plaid", "notion", "airtable", "retool",
+]
+
+# --- Ashby: common with startups ---
+# e.g. https://jobs.ashbyhq.com/cohere -> "cohere"
+ASHBY_COMPANIES = [
+    "cohere", "openai", "anthropic", "perplexity", "cursor", "linear",
+    "mercury", "ramp", "retool", "notion", "airtable", "vercel",
+    "supabase", "huggingface", "weightsandbiases", "wandb", "modal",
+    "runway", "pika", "elevenlabs", "mistral", "poolside", "replicate",
+    "browserbase", "turso", "neon", "railway", "render", "tailscale",
+    "incidentio", "posthog", "sentry", "sourcegraph", "grafana",
+    "deepmind", "scaleai", "adept", "harvey", "gretel", "modal-labs",
 ]
 
 # --- Workday: 每家独立, 格式 (公司名, 子域host, tenant, 站点路径) ---
@@ -168,27 +195,53 @@ WORKDAY_COMPANIES = [
 # --- LinkedIn search keywords / location ---
 LINKEDIN_QUERIES = [
     ("software engineer intern fall 2026", "Canada"),
+    ("software intern fall 2026", "Canada"),
+    ("developer intern fall 2026", "Canada"),
     ("software developer intern fall 2026", "Canada"),
+    ("software engineering co-op fall 2026", "Canada"),
+    ("developer co-op fall 2026", "Canada"),
+    ("4 month software intern September 2026", "Canada"),
     ("data analyst intern fall 2026", "Canada"),
+    ("data intern fall 2026", "Canada"),
     ("qa test intern fall 2026", "Canada"),
+    ("quality assurance intern fall 2026", "Canada"),
     ("cloud devops intern fall 2026", "Canada"),
+    ("IT intern fall 2026", "Canada"),
+    ("technology intern fall 2026", "Canada"),
+    ("technical analyst intern fall 2026", "Canada"),
     ("new grad software engineer 2026", "Canada"),
+    ("junior software developer 2026", "Canada"),
+    ("junior software engineer Canada 2026", "Canada"),
     ("entry level software developer 2026", "Canada"),
+    ("entry level technology analyst 2026", "Canada"),
     ("technology analyst new grad 2026", "Canada"),
 ]
 
 # --- Indeed search keywords / location ---
 INDEED_QUERIES = [
     ("software engineer intern fall 2026", "Canada"),
+    ("software intern fall 2026", "Canada"),
+    ("developer intern fall 2026", "Canada"),
     ("software developer intern fall 2026", "Canada"),
     ("computer engineering intern fall 2026", "Canada"),
+    ("software engineering co-op fall 2026", "Canada"),
+    ("developer co-op fall 2026", "Canada"),
+    ("4 month software intern September 2026", "Canada"),
     ("data analyst intern fall 2026", "Canada"),
+    ("data intern fall 2026", "Canada"),
     ("qa test intern fall 2026", "Canada"),
+    ("quality assurance intern fall 2026", "Canada"),
     ("cloud devops intern fall 2026", "Canada"),
     ("cybersecurity intern fall 2026", "Canada"),
+    ("IT intern fall 2026", "Canada"),
+    ("technology intern fall 2026", "Canada"),
+    ("technical analyst intern fall 2026", "Canada"),
     ("software engineer new grad 2026", "Canada"),
     ("software developer new grad 2026", "Canada"),
+    ("junior software developer 2026", "Canada"),
+    ("junior software engineer Canada 2026", "Canada"),
     ("entry level software engineer 2026", "Canada"),
+    ("entry level technology analyst 2026", "Canada"),
     ("technology analyst new grad 2026", "Canada"),
 ]
 
@@ -443,6 +496,45 @@ def fetch_lever():
                             "reject_reason": reject_reason(title, desc, loc)})
         except Exception as e:
             print(f"[lever:{slug}] {e}")
+    return out
+
+def fetch_ashby():
+    out = []
+    for slug in ASHBY_COMPANIES:
+        url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+            if r.status_code != 200:
+                print(f"[ashby:{slug}] status {r.status_code}")
+                continue
+            for j in r.json().get("jobs", []):
+                title = j.get("title", "")
+                locs = j.get("location") or j.get("locations") or []
+                if isinstance(locs, list):
+                    loc = ", ".join(
+                        x.get("name", "") if isinstance(x, dict) else str(x)
+                        for x in locs
+                    )
+                elif isinstance(locs, dict):
+                    loc = locs.get("name", "")
+                else:
+                    loc = str(locs)
+                desc = j.get("descriptionPlain") or j.get("descriptionHtml") or ""
+                posted = (
+                    j.get("publishedAt")
+                    or j.get("createdAt")
+                    or j.get("updatedAt")
+                )
+                out.append({
+                    "title": title,
+                    "company": slug,
+                    "location": loc,
+                    "url": j.get("jobUrl") or j.get("applyUrl") or "",
+                    "posted_ts": parse_iso(posted),
+                    "reject_reason": reject_reason(title, desc, loc),
+                })
+        except Exception as e:
+            print(f"[ashby:{slug}] {e}")
     return out
 
 def parse_workday_posted(text):
@@ -750,7 +842,7 @@ def send(jobs, header=None):
 
 def collect_all_jobs():
     all_jobs = []
-    for fn in (fetch_greenhouse, fetch_lever, fetch_workday,
+    for fn in (fetch_greenhouse, fetch_lever, fetch_ashby, fetch_workday,
                fetch_community, fetch_linkedin, fetch_indeed):
         try:
             all_jobs.extend(fn())
