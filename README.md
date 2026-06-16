@@ -18,7 +18,7 @@
 - New grad / entry-level / junior 这类岗位，只要是 2026 或 9 月之后可开始即可。
 - 明确要求 Canadian citizenship 的岗位会跳过。
 - 硬性要求 French / bilingual French 的岗位会跳过。
-- 明确限制非软件/计算机/数据/IT/STEM 专业的岗位会跳过。
+- 明确硬性限制明显不相关专业（如 accounting、nursing、mechanical/civil/chemical engineering 等）的岗位会跳过。
 
 > 关于精度：能精确到分钟的来源（ATS / 社区源）就按"最近 N 分钟"窗口推，
 > 真正做到一发布就提醒；LinkedIn 如果只给日期不给时间，没法证明它属于最近

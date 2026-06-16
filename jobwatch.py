@@ -319,16 +319,16 @@ FRENCH_REQUIRED_RE = re.compile(
     r"fran[cç]ais\s+(?:obligatoire|requis))\b",
     re.I,
 )
-ALLOWED_MAJOR_RE = re.compile(
-    r"\b(computer\s+science|software\s+engineering|computer\s+engineering|"
-    r"data\s+science|information\s+systems?|information\s+technology|"
-    r"electrical\s+and\s+computer|stem)\b",
-    re.I,
-)
-SPECIFIC_MAJOR_RE = re.compile(
+UNRELATED_MAJOR_RE = re.compile(
     r"\b(must\s+be\s+(?:currently\s+)?(?:enrolled|pursuing)|"
-    r"requires?\s+(?:a\s+)?(?:degree|major)|"
-    r"degree\s+in|major\s+in)\b",
+    r"requires?\s+(?:a\s+)?(?:degree|major)|degree\s+in|major\s+in)"
+    r"[^.]{0,120}\b("
+    r"accounting|finance|marketing|human\s+resources|hr|law|legal|"
+    r"nursing|pharmacy|medicine|medical|biology|biochemistry|chemistry|"
+    r"architecture|urban\s+planning|education|psychology|social\s+work|"
+    r"mechanical\s+engineering|civil\s+engineering|chemical\s+engineering|"
+    r"industrial\s+engineering|aerospace\s+engineering|environmental\s+engineering"
+    r")\b",
     re.I,
 )
 
@@ -347,7 +347,7 @@ def matches(title, description=""):
         return False
     if FRENCH_REQUIRED_RE.search(blob):
         return False
-    if SPECIFIC_MAJOR_RE.search(blob) and not ALLOWED_MAJOR_RE.search(blob):
+    if UNRELATED_MAJOR_RE.search(blob):
         return False
     if INTERN_RE.search(t):
         if LONG_INTERNSHIP_RE.search(blob):
