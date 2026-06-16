@@ -4,7 +4,7 @@
 
 - **平时（每 30 分钟）**：只推"刚发布"的岗位。对有精确发布时间的来源
   （公司官网 ATS、社区聚合源），做到真正的增量——只推最近这段时间内
-  新发布的；没有新岗位就一条不发。对只提供日期的来源（如 LinkedIn），
+  新发布的；没有新岗位也会发一条简短状态提示。对只提供日期的来源（如 LinkedIn），
   做到"当天新出现的推一次"，靠去重保证不重复。
 - **每天午夜（约凌晨 0 点，东部时间）**：发一份"当日汇总"，
   把过去 24 小时发布的岗位归总一次，方便回顾。
@@ -114,6 +114,58 @@ requirements.txt
 
 想验证：等半小时看 Actions 里有没有新的自动运行记录，
 或者随时回到 Actions 手动 `Run workflow` 测试。
+
+---
+
+## 备用方案：用 cron-job.org 触发 GitHub workflow
+
+如果 GitHub 自带的 `schedule` 不稳定，可以让外部定时器每 30 分钟调用
+GitHub API。效果等同于自动帮你点 `Run workflow`，仍然是 GitHub Actions
+在跑 `jobwatch.py`。
+
+### 1. 先创建 GitHub token
+
+1. GitHub 右上角头像 → `Settings`。
+2. 左侧 `Developer settings` → `Personal access tokens` → `Fine-grained tokens`。
+3. 点 `Generate new token`。
+4. Repository access 选 `Only select repositories`，只选你的 `jobWatcher` 仓库。
+5. Repository permissions 里把 `Actions` 设成 `Read and write`。
+6. 生成后复制 token。只复制这一次，别贴进代码、README、Discord 或公开地方。
+
+### 2. 在 cron-job.org 新建定时任务
+
+1. 打开 `https://cron-job.org`，注册并登录。
+2. 点 `Create cronjob`。
+3. Schedule 选每 30 分钟一次。
+4. URL 填：
+
+```text
+https://api.github.com/repos/ivyyyyy2002-svg/jobWatcher/actions/workflows/jobwatch.yml/dispatches
+```
+
+5. Request method 选 `POST`。
+6. Request body / Body 填：
+
+```json
+{"ref":"main","inputs":{"mode":"alert"}}
+```
+
+7. Headers 添加这几项：
+
+```text
+Accept: application/vnd.github+json
+Authorization: Bearer YOUR_GITHUB_TOKEN
+X-GitHub-Api-Version: 2026-03-10
+Content-Type: application/json
+```
+
+把 `YOUR_GITHUB_TOKEN` 换成你刚刚复制的 token。
+
+### 3. 保存后测试
+
+保存 cronjob 后点一次手动执行/测试。成功时 GitHub Actions 页面会出现一条新的
+`workflow_dispatch` 运行记录。以后 cron-job.org 每 30 分钟触发一次，即使
+GitHub 自带 `schedule` 没触发，也能继续自动检查岗位。
 
 ---
 
