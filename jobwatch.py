@@ -71,7 +71,7 @@ FILTER_MODE = "loose"
 # Each alert run only notifies about jobs whose minute-precise posting time
 # falls within this window. The dedup DB still prevents repeats if a job appears
 # in overlapping runs.
-ALERT_WINDOW_MINUTES = 180
+ALERT_WINDOW_MINUTES = 60
 
 # --- Daily digest ---
 # A separate "digest" run (meant for ~midnight) summarizes everything posted
@@ -801,6 +801,13 @@ def compact_job_label(j):
     company = j.get("company") or "Unknown"
     return f"{title} — {company}"
 
+def alert_window_label():
+    if ALERT_WINDOW_MINUTES % 60 == 0:
+        hours = ALERT_WINDOW_MINUTES // 60
+        noun = "hour" if hours == 1 else "hours"
+        return f"{hours} {noun}"
+    return f"{ALERT_WINDOW_MINUTES} minutes"
+
 def add_example(stats, reason, job, limit=5):
     examples = stats.setdefault("examples", [])
     if len(examples) < limit:
@@ -813,7 +820,7 @@ def alert_header(count, stats=None):
     lines = [
         f"**Jobwatch: {count} new {noun}** · {now}",
         "Canada · Sep-Dec internships / Sep+ new grad",
-        f"Checked the last {ALERT_WINDOW_MINUTES // 60} hours.",
+        f"Checked the last {alert_window_label()}.",
     ]
     if count:
         lines.append("")
@@ -920,14 +927,13 @@ def run_alert():
             continue
         if ts < cutoff:
             stats["outside_window"] += 1
-            add_example(stats, "outside 3h", j)
+            add_example(stats, "outside window", j)
             continue
         stats["in_window"] += 1
         # Backstop: skip anything we've already notified about.
         uid = make_uid(j["company"], j["title"], j["url"])
         if not is_new(con, uid):
             stats["duplicate"] += 1
-            add_example(stats, "duplicate", j)
             continue
         new_jobs.append(j)
         mark_seen(con, uid)
