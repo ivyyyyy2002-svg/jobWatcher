@@ -23,8 +23,10 @@ import time
 import hashlib
 import sqlite3
 import smtplib
+from email.utils import parsedate_to_datetime
 from email.mime.text import MIMEText
 from datetime import datetime, timezone
+from urllib.parse import quote_plus
 
 import requests
 from bs4 import BeautifulSoup
@@ -35,19 +37,30 @@ from bs4 import BeautifulSoup
 
 # --- Keyword filter ---
 # Role keywords: word-boundary match to avoid false hits like "Internal"/"International".
-# Covers both internships and full-time early-career / new-grad roles.
+# Covers software-first roles plus adjacent technical / engineering roles.
 ROLE_RE = re.compile(
-    r"\b(intern|internship|co-?op|new\s*grad|graduate|entry[\s-]*level|"
-    r"early\s*career|early[\s-]*talent|student|university|junior|associate\s+engineer|"
-    r"engineer(ing)?|developer|software)\b|实习",
+    r"\b(software|developer|engineer(ing)?|programmer|full[\s-]*stack|backend|"
+    r"front[\s-]*end|frontend|platform|cloud|devops|sre|data|machine\s*learning|"
+    r"ml|ai|security|qa|quality\s*assurance|test|systems?|technical|technology|"
+    r"it|analyst)\b|实习",
     re.I,
 )
 # Term signal words (Fall 2026). Hitting any one counts as the target term.
-TERM_RE = re.compile(r"\b(2026|fall|autumn|september|sept)\b", re.I)
+TERM_RE = re.compile(r"\b(2026|fall|autumn|september|sept|sep|new\s*grad)\b", re.I)
 # Explicitly belongs to another term -> drop it.
 OTHER_TERM_RE = re.compile(r"\b(summer|spring|winter)\s*20(25|27)\b|\b2025\b|\b2027\b", re.I)
-# Extra exclude words.
-EXCLUDE = ["phd only"]
+EXCLUDE = [
+    "phd only",
+    "canadian citizenship required",
+    "must be a canadian citizen",
+    "must be canadian citizen",
+    "canadian citizens only",
+    "requires canadian citizenship",
+    "french required",
+    "must speak french",
+    "fluent in french",
+    "bilingual french",
+]
 
 # Filter mode:
 #   "strict" = must be a target role AND mention 2026/fall
@@ -55,18 +68,10 @@ EXCLUDE = ["phd only"]
 FILTER_MODE = "loose"
 
 # --- Freshness (alert mode) ---
-# This is the core of "notify me about jobs posted in the last ~30 min".
-# Each run, only notify about jobs whose POSTING TIME falls within this window.
-# Set it a bit LARGER than your cron interval so a delayed run (GitHub's free
-# scheduler can lag a few min) doesn't miss postings. E.g. cron every 30 min ->
-# window 45 min gives 15 min of slack. The dedup DB still prevents repeats, so
-# a little overlap just means "no duplicates", never "spam".
-ALERT_WINDOW_MINUTES = 45
-# Jobs with NO known posting time (some sources don't expose it): you can't
-# window-filter these, so decide what to do. True = notify on first sight only
-# (dedup stops repeats). False = ignore undated jobs entirely (stricter; means
-# you might miss a few postings whose source hides the date).
-ALERT_INCLUDE_UNKNOWN_DATE = True
+# Each alert run only notifies about jobs whose minute-precise posting time
+# falls within this window. The dedup DB still prevents repeats if a job appears
+# in overlapping runs.
+ALERT_WINDOW_MINUTES = 30
 
 # --- Daily digest ---
 # A separate "digest" run (meant for ~midnight) summarizes everything posted
@@ -163,7 +168,28 @@ WORKDAY_COMPANIES = [
 # --- LinkedIn search keywords / location ---
 LINKEDIN_QUERIES = [
     ("software engineer intern 2026", "Canada"),
+    ("software developer intern fall 2026", "Canada"),
+    ("data analyst intern fall 2026", "Canada"),
+    ("qa test intern fall 2026", "Canada"),
+    ("cloud devops intern fall 2026", "Canada"),
     ("new grad software engineer 2026", "Canada"),
+    ("entry level software developer 2026", "Canada"),
+    ("technology analyst new grad 2026", "Canada"),
+]
+
+# --- Indeed search keywords / location ---
+INDEED_QUERIES = [
+    ("software engineer intern fall 2026", "Canada"),
+    ("software developer intern fall 2026", "Canada"),
+    ("computer engineering intern fall 2026", "Canada"),
+    ("data analyst intern fall 2026", "Canada"),
+    ("qa test intern fall 2026", "Canada"),
+    ("cloud devops intern fall 2026", "Canada"),
+    ("cybersecurity intern fall 2026", "Canada"),
+    ("software engineer new grad 2026", "Canada"),
+    ("software developer new grad 2026", "Canada"),
+    ("entry level software engineer 2026", "Canada"),
+    ("technology analyst new grad 2026", "Canada"),
 ]
 
 # --- Notification method: pick one ---
@@ -223,6 +249,15 @@ def parse_iso(s):
     except Exception:
         return None
 
+def parse_rss_date(s):
+    """RSS date string -> Unix seconds, or None."""
+    if not s:
+        return None
+    try:
+        return int(parsedate_to_datetime(s).timestamp())
+    except Exception:
+        return None
+
 def humanize_age(ts):
     """Unix seconds -> ('2026-06-16 14:05', '23m ago'). Returns ('','') if None."""
     if not ts:
@@ -252,6 +287,50 @@ EARLY_RE = re.compile(
     r"early\s*career|early[\s-]*talent|student|university|junior)\b|实习",
     re.I,
 )
+INTERN_RE = re.compile(r"\b(intern|internship|co-?op|student)\b|实习", re.I)
+NEW_GRAD_RE = re.compile(
+    r"\b(new\s*grad|graduate|entry[\s-]*level|early\s*career|"
+    r"early[\s-]*talent|junior)\b",
+    re.I,
+)
+FALL_TERM_RE = re.compile(
+    r"\b(fall|autumn|sept(?:ember)?|sep(?:tember)?|"
+    r"sep\.?\s*(?:-|to|through|–|—)\s*dec\.?|"
+    r"sept\.?\s*(?:-|to|through|–|—)\s*dec\.?|"
+    r"september\s*(?:-|to|through|–|—)\s*december|"
+    r"4\s*[- ]?\s*months?|four\s*months?)\b",
+    re.I,
+)
+LONG_INTERNSHIP_RE = re.compile(
+    r"\b(6|8|12|16)\s*[- ]?\s*(?:-|to|–|—)?\s*months?\b|"
+    r"\b(six|eight|twelve|sixteen)\s*months?\b|"
+    r"\b(year[\s-]*long|one\s*year|1\s*year)\b",
+    re.I,
+)
+CITIZENSHIP_RE = re.compile(
+    r"\b(canadian\s+citizenship|required\s+canadian\s+citizenship|"
+    r"canadian\s+citizens?\s+only|must\s+be\s+(?:a\s+)?canadian\s+citizen|"
+    r"requires?\s+canadian\s+citizenship)\b",
+    re.I,
+)
+FRENCH_REQUIRED_RE = re.compile(
+    r"\b(french\s+(?:is\s+)?required|required\s+french|must\s+speak\s+french|"
+    r"fluent\s+in\s+french|bilingual\s+.*french|french\s+and\s+english\s+required|"
+    r"fran[cç]ais\s+(?:obligatoire|requis))\b",
+    re.I,
+)
+ALLOWED_MAJOR_RE = re.compile(
+    r"\b(computer\s+science|software\s+engineering|computer\s+engineering|"
+    r"data\s+science|information\s+systems?|information\s+technology|"
+    r"electrical\s+and\s+computer|stem)\b",
+    re.I,
+)
+SPECIFIC_MAJOR_RE = re.compile(
+    r"\b(must\s+be\s+(?:currently\s+)?(?:enrolled|pursuing)|"
+    r"requires?\s+(?:a\s+)?(?:degree|major)|"
+    r"degree\s+in|major\s+in)\b",
+    re.I,
+)
 
 def matches(title, description=""):
     t = title or ""
@@ -264,6 +343,20 @@ def matches(title, description=""):
         return False
     if any(x in blob.lower() for x in EXCLUDE):
         return False
+    if CITIZENSHIP_RE.search(blob):
+        return False
+    if FRENCH_REQUIRED_RE.search(blob):
+        return False
+    if SPECIFIC_MAJOR_RE.search(blob) and not ALLOWED_MAJOR_RE.search(blob):
+        return False
+    if INTERN_RE.search(t):
+        if LONG_INTERNSHIP_RE.search(blob):
+            return False
+        if not FALL_TERM_RE.search(blob):
+            return False
+    elif NEW_GRAD_RE.search(t):
+        if not TERM_RE.search(blob):
+            return False
     if FILTER_MODE == "strict":
         return bool(TERM_RE.search(blob))  # must mention 2026/fall
     return True                            # loose: keep early-career role
@@ -425,6 +518,40 @@ def fetch_linkedin():
             print(f"[linkedin] {e}")
     return out
 
+def fetch_indeed():
+    out = []
+    for kw, loc in INDEED_QUERIES:
+        try:
+            url = (
+                "https://ca.indeed.com/rss"
+                f"?q={quote_plus(kw)}&l={quote_plus(loc)}&fromage=1"
+            )
+            r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+            if r.status_code != 200:
+                print(f"[indeed] status {r.status_code}")
+                continue
+            soup = BeautifulSoup(r.text, "xml")
+            for item in soup.select("item"):
+                raw_title = item.title.get_text(strip=True) if item.title else ""
+                desc = item.description.get_text(" ", strip=True) if item.description else ""
+                link = item.link.get_text(strip=True) if item.link else ""
+                pub = item.pubDate.get_text(strip=True) if item.pubDate else ""
+                parts = [p.strip() for p in raw_title.split(" - ") if p.strip()]
+                title = parts[0] if parts else raw_title
+                company = parts[1] if len(parts) > 1 else "Indeed"
+                job_loc = parts[2] if len(parts) > 2 else loc
+                if matches(title, desc) and location_ok(job_loc):
+                    out.append({
+                        "title": title,
+                        "company": company,
+                        "location": job_loc,
+                        "url": link,
+                        "posted_ts": parse_rss_date(pub),
+                    })
+        except Exception as e:
+            print(f"[indeed] {e}")
+    return out
+
 def fetch_community():
     """Read Simplify / Vansh listings.json directly. This is the big multiplier:
     their scrapers cover hundreds of companies, and we union it with our own."""
@@ -527,16 +654,16 @@ def format_block(j):
     stamp, ago = humanize_age(j.get("posted_ts"))
     title = j.get("title", "")
     company = j.get("company", "")
-    line1 = f"✨ **{title}**"
+    line1 = f"**{title}**"
     bits = []
     if company:
-        bits.append(f"🏢 {company}")
+        bits.append(company)
     if j.get("location"):
-        bits.append(f"📍 {j['location']}")
+        bits.append(j["location"])
     if ago:
-        bits.append(f"🕒 {ago}")
+        bits.append(ago)
     line2 = " · ".join(bits)
-    line3 = f"🔗 <{j['url']}>" if j.get("url") else ""
+    line3 = f"<{j['url']}>" if j.get("url") else ""
     lines = [line1]
     if line2:
         lines.append(line2)
@@ -549,8 +676,8 @@ def alert_header(count):
     now = datetime.now().strftime("%b %d %H:%M")
     if count:
         noun = "posting" if count == 1 else "postings"
-        return f"🌷 **{count} new {noun} found** · {now}\nFresh leads are ready for you."
-    return f"🌙 **0 new postings right now** · {now}\nAll quiet for this check. I will keep watching."
+        return f"**Jobwatch: {count} new {noun}** · {now}\nCanada · Sep-Dec internships / Sep+ new grad"
+    return f"**Jobwatch: 0 new postings** · {now}\nChecked the last {ALERT_WINDOW_MINUTES} minutes."
 
 def send(jobs, header=None):
     if header is None:
@@ -585,7 +712,7 @@ def send(jobs, header=None):
 def collect_all_jobs():
     all_jobs = []
     for fn in (fetch_greenhouse, fetch_lever, fetch_workday,
-               fetch_community, fetch_linkedin):
+               fetch_community, fetch_linkedin, fetch_indeed):
         try:
             all_jobs.extend(fn())
         except Exception as e:
@@ -597,10 +724,8 @@ def run_alert():
     """Incremental mode: notify ONLY about jobs whose posting time falls within
     the last ALERT_WINDOW_MINUTES. The dedup DB is a backstop against repeats.
 
-    Precision caveat: some sources (e.g. LinkedIn) only give a DATE, not a time,
-    so their timestamp is midnight of that day. We can't minute-window those, so
-    for date-only postings we fall back to "notify on first sight" (dedup), which
-    is the best available signal. Minute-precise sources use the real window."""
+    Jobs without a minute-precise posting time are skipped in alert mode because
+    they cannot be safely proven to belong to the current window."""
     con = db_init()
     all_jobs = collect_all_jobs()
     now = time.time()
@@ -615,20 +740,13 @@ def run_alert():
     considered = 0
     for j in all_jobs:
         ts = j.get("posted_ts")
-        if ts and not is_date_only(ts):
-            # minute-precise: strict window
-            if ts < cutoff:
-                continue
-            considered += 1
-        else:
-            # date-only or unknown: can't window it -> let dedup decide.
-            # Still drop clearly-old date-only postings (posted before today-1)
-            # so a brand-new empty DB doesn't flood on first run.
-            if ts and ts < now - 2 * 86400:
-                continue
-            if not ts and not ALERT_INCLUDE_UNKNOWN_DATE:
-                continue
-            considered += 1
+        if not ts:
+            continue
+        if is_date_only(ts):
+            continue
+        if ts < cutoff:
+            continue
+        considered += 1
         # Backstop: skip anything we've already notified about.
         uid = make_uid(j["company"], j["title"], j["url"])
         if not is_new(con, uid):
