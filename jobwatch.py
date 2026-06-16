@@ -817,26 +817,27 @@ def alert_header(count, stats=None):
     """Build the alert-mode Discord header."""
     now = datetime.now().strftime("%b %d %H:%M")
     noun = "posting" if count == 1 else "postings"
-    lines = [
-        f"**Jobwatch: {count} new {noun}** · {now}",
-        "Canada · Sep-Dec internships / Sep+ new grad",
-        f"Checked the last {alert_window_label()}.",
-    ]
-    if count:
-        lines.append("")
+    lines = [f"**Jobwatch: {count} new {noun}** · {now}"]
     if stats:
-        if stats.get("filtered"):
-            lines.append(f"{stats['filtered']} candidate(s) filtered before timing.")
+        summary = [
+            f"window {alert_window_label()}",
+            f"candidates {stats['fetched']}",
+            f"usable {stats['in_window']}",
+        ]
         if stats.get("duplicate"):
-            lines.append(
-                f"{stats['duplicate']} matching posting(s) were already sent before."
-            )
-        lines.append(
-            f"Fetched {stats['fetched']} candidate(s); "
-            f"{stats['in_window']} had usable times inside the window."
-        )
+            summary.append(f"duplicate {stats['duplicate']}")
+        if stats.get("filtered"):
+            summary.append(f"filtered {stats['filtered']}")
+        lines.append(" · ".join(summary))
+        if count:
+            lines.append("")
+    else:
+        lines.append(f"window {alert_window_label()}")
+        if count:
+            lines.append("")
+    if stats:
         if stats.get("examples"):
-            lines.append("Examples:")
+            lines.append("Filtered examples:")
             for reason, label in stats["examples"]:
                 lines.append(f"- {reason}: {label}")
     return "\n".join(lines)
