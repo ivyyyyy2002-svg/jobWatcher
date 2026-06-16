@@ -167,7 +167,7 @@ WORKDAY_COMPANIES = [
 
 # --- LinkedIn search keywords / location ---
 LINKEDIN_QUERIES = [
-    ("software engineer intern 2026", "Canada"),
+    ("software engineer intern fall 2026", "Canada"),
     ("software developer intern fall 2026", "Canada"),
     ("data analyst intern fall 2026", "Canada"),
     ("qa test intern fall 2026", "Canada"),
@@ -473,7 +473,7 @@ def fetch_workday():
                         loc = j.get("locationsText", "")
                         path = j.get("externalPath", "")
                         full = f"https://{host}{('/' + site) if site else ''}{path}"
-                        if matches(title) and location_ok(loc):
+                        if matches(title, search) and location_ok(loc):
                             out.append({"title": title, "company": name,
                                         "location": loc, "url": full,
                                         "posted_ts": parse_workday_posted(j.get("postedOn"))})
@@ -506,7 +506,7 @@ def fetch_linkedin():
                 job_loc = loc_el.get_text(strip=True) if loc_el else loc
                 t_el = card.select_one("time")
                 pts = parse_iso(t_el.get("datetime")) if t_el else None
-                if matches(title) and location_ok(job_loc):
+                if matches(title, kw) and location_ok(job_loc):
                     out.append({
                         "title": title,
                         "company": comp_el.get_text(strip=True) if comp_el else "",
@@ -540,7 +540,7 @@ def fetch_indeed():
                 title = parts[0] if parts else raw_title
                 company = parts[1] if len(parts) > 1 else "Indeed"
                 job_loc = parts[2] if len(parts) > 2 else loc
-                if matches(title, desc) and location_ok(job_loc):
+                if matches(title, f"{kw} {desc}") and location_ok(job_loc):
                     out.append({
                         "title": title,
                         "company": company,
@@ -579,7 +579,8 @@ def fetch_community():
                 title = j.get("title", "")
                 locs = j.get("locations") or []
                 loc = ", ".join(locs) if isinstance(locs, list) else str(locs)
-                if not matches(title):
+                desc = json.dumps(j, ensure_ascii=False)
+                if not matches(title, desc):
                     continue
                 if not location_ok(loc):
                     continue
@@ -671,13 +672,26 @@ def format_block(j):
         lines.append(line3)
     return "\n".join(lines)
 
-def alert_header(count):
+def alert_header(count, stats=None):
     """Build the alert-mode Discord header."""
     now = datetime.now().strftime("%b %d %H:%M")
     if count:
         noun = "posting" if count == 1 else "postings"
         return f"**Jobwatch: {count} new {noun}** · {now}\nCanada · Sep-Dec internships / Sep+ new grad"
-    return f"**Jobwatch: 0 new postings** · {now}\nChecked the last {ALERT_WINDOW_MINUTES // 60} hours."
+    lines = [
+        f"**Jobwatch: 0 new postings** · {now}",
+        f"Checked the last {ALERT_WINDOW_MINUTES // 60} hours.",
+    ]
+    if stats:
+        if stats.get("duplicate"):
+            lines.append(
+                f"{stats['duplicate']} matching posting(s) were already sent before."
+            )
+        lines.append(
+            f"Fetched {stats['fetched']} matching candidate(s); "
+            f"{stats['in_window']} had usable times inside the window."
+        )
+    return "\n".join(lines)
 
 def send(jobs, header=None):
     if header is None:
@@ -737,26 +751,37 @@ def run_alert():
         return dt.hour == 0 and dt.minute == 0 and dt.second == 0
 
     new_jobs = []
-    considered = 0
+    stats = {
+        "fetched": len(all_jobs),
+        "no_time": 0,
+        "date_only": 0,
+        "outside_window": 0,
+        "in_window": 0,
+        "duplicate": 0,
+    }
     for j in all_jobs:
         ts = j.get("posted_ts")
         if not ts:
+            stats["no_time"] += 1
             continue
         if is_date_only(ts):
+            stats["date_only"] += 1
             continue
         if ts < cutoff:
+            stats["outside_window"] += 1
             continue
-        considered += 1
+        stats["in_window"] += 1
         # Backstop: skip anything we've already notified about.
         uid = make_uid(j["company"], j["title"], j["url"])
         if not is_new(con, uid):
+            stats["duplicate"] += 1
             continue
         new_jobs.append(j)
         mark_seen(con, uid)
 
-    print(f"Fetched {len(all_jobs)} jobs, {considered} eligible, "
-          f"{len(new_jobs)} new to notify")
-    send(new_jobs, header=alert_header(len(new_jobs)))
+    print(f"Fetched {len(all_jobs)} jobs, {stats['in_window']} eligible, "
+          f"{stats['duplicate']} duplicates, {len(new_jobs)} new to notify")
+    send(new_jobs, header=alert_header(len(new_jobs), stats=stats))
 
 def run_digest():
     """Daily mode (~midnight): summarize everything posted in the last
