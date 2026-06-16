@@ -6,9 +6,8 @@ on:
     # GitHub cron is UTC. Free-tier scheduled runs can be delayed a few minutes
     # at peak times; offset minutes avoid the busiest :00/:30 scheduler windows.
     - cron: "7,37 * * * *"
-    # DIGEST mode — once daily. 04:00 UTC = 00:00 Eastern (London, ON) in summer.
-    # In winter (EST, UTC-5) this lands at 23:00 the previous day; close enough.
-    - cron: "0 4 * * *"
+    # DIGEST mode — once daily around midnight / 1 AM Eastern.
+    - cron: "0 5 * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -40,7 +39,7 @@ jobs:
         run: pip install requests beautifulsoup4 lxml
 
       # Decide the mode:
-      #  - the 04:00 UTC schedule -> digest
+      #  - the 05:00 UTC schedule -> digest
       #  - everything else (30-min schedule) -> alert
       #  - manual run -> whatever you picked in the dropdown
       - name: Determine mode
@@ -48,7 +47,7 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "mode=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event.schedule }}" == "0 4 * * *" ]]; then
+          elif [[ "${{ github.event.schedule }}" == "0 5 * * *" ]]; then
             echo "mode=digest" >> "$GITHUB_OUTPUT"
           else
             echo "mode=alert" >> "$GITHUB_OUTPUT"

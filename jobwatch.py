@@ -27,6 +27,7 @@ from email.utils import parsedate_to_datetime
 from email.mime.text import MIMEText
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
@@ -78,6 +79,7 @@ ALERT_WINDOW_MINUTES = 60
 # during the day, regardless of whether it was already alerted. It does NOT
 # touch the dedup DB, so it never interferes with alert mode.
 DIGEST_LOOKBACK_HOURS = 24
+DIGEST_TIMEZONE = "America/Toronto"
 
 # --- Location filter ---
 # Two modes:
@@ -837,6 +839,43 @@ def alert_header(count, stats=None):
             lines.append("")
     return "\n".join(lines)
 
+def digest_header(jobs):
+    now = datetime.now(ZoneInfo(DIGEST_TIMEZONE))
+    count = len(jobs)
+    noun = "posting" if count == 1 else "postings"
+    return (
+        f"**Daily Jobwatch Digest** · {now:%b %d}\n"
+        f"{count} matching {noun} from the last {DIGEST_LOOKBACK_HOURS} hours"
+    )
+
+def digest_blocks(jobs):
+    jobs = sorted(
+        jobs,
+        key=lambda j: ((j.get("company") or "").lower(), -(j.get("posted_ts") or 0)),
+    )
+    blocks = []
+    current_company = None
+    for j in jobs:
+        company = j.get("company") or "Unknown"
+        if company != current_company:
+            blocks.append(f"---\n**{company}**")
+            current_company = company
+        stamp, ago = humanize_age(j.get("posted_ts"))
+        details = []
+        if j.get("location"):
+            details.append(j["location"])
+        if ago:
+            details.append(ago)
+        lines = [f"**{j.get('title', '')}**"]
+        if details:
+            lines.append(" · ".join(details))
+        if j.get("note"):
+            lines.append(f"Note: {j['note']}")
+        if j.get("url"):
+            lines.append(j["url"])
+        blocks.append("\n".join(lines))
+    return blocks
+
 def send(jobs, header=None):
     if header is None:
         header = alert_header(len(jobs))
@@ -957,15 +996,21 @@ def run_digest():
         seen.add(uid)
         todays.append(j)
     n = len(todays)
-    header = (f"📊 **Daily digest** · {datetime.now():%b %d}\n"
-              f"{n} posting{'s' if n != 1 else ''} in the last "
-              f"{DIGEST_LOOKBACK_HOURS}h")
+    header = digest_header(todays)
     print(f"Digest: {n} jobs in last {DIGEST_LOOKBACK_HOURS}h")
     if n:
-        send(todays, header=header)
+        blocks = digest_blocks(todays)
+        if NOTIFY == "discord":
+            notify_discord(blocks, header)
+        elif NOTIFY == "telegram":
+            notify_telegram(header + "\n\n" + "\n\n".join(blocks))
+        elif NOTIFY == "email":
+            notify_email(header + "\n\n" + "\n\n".join(blocks))
+        else:
+            print(header + "\n\n" + "\n\n".join(blocks))
     elif NOTIFY == "discord" and DISCORD_WEBHOOK:
         # still send a heartbeat so you know it ran
-        notify_discord([], header + "\n(nothing new today)")
+        notify_discord([], header + "\nNo matching postings today.")
 
 def main():
     mode = "alert"
