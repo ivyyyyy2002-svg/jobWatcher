@@ -527,19 +527,16 @@ def format_block(j):
     stamp, ago = humanize_age(j.get("posted_ts"))
     title = j.get("title", "")
     company = j.get("company", "")
-    # Line 1: bold title
-    line1 = f"**{title}**"
-    # Line 2: company · location · age
+    line1 = f"✨ **{title}**"
     bits = []
     if company:
-        bits.append(company)
+        bits.append(f"🏢 {company}")
     if j.get("location"):
         bits.append(f"📍 {j['location']}")
     if ago:
         bits.append(f"🕒 {ago}")
     line2 = " · ".join(bits)
-    # Line 3: url
-    line3 = f"<{j['url']}>" if j.get("url") else ""
+    line3 = f"🔗 <{j['url']}>" if j.get("url") else ""
     lines = [line1]
     if line2:
         lines.append(line2)
@@ -547,13 +544,29 @@ def format_block(j):
         lines.append(line3)
     return "\n".join(lines)
 
+def alert_header(count):
+    """Build the alert-mode Discord header."""
+    now = datetime.now().strftime("%b %d %H:%M")
+    if count:
+        noun = "posting" if count == 1 else "postings"
+        return f"🌷 **{count} new {noun} found** · {now}\nFresh leads are ready for you."
+    return f"🌙 **0 new postings right now** · {now}\nAll quiet for this check. I will keep watching."
+
 def send(jobs, header=None):
+    if header is None:
+        header = alert_header(len(jobs))
     if not jobs:
+        if NOTIFY == "discord":
+            notify_discord([], header)
+        elif NOTIFY == "telegram":
+            notify_telegram(header)
+        elif NOTIFY == "email":
+            notify_email(header)
+        else:
+            print(header)
         return
     # Newest first; unknown-time jobs go last.
     jobs = sorted(jobs, key=lambda j: j.get("posted_ts") or 0, reverse=True)
-    if header is None:
-        header = f"🔔 **{len(jobs)} new postings** · {datetime.now():%b %d %H:%M}"
     blocks = [format_block(j) for j in jobs]
 
     if NOTIFY == "discord":
@@ -625,7 +638,7 @@ def run_alert():
 
     print(f"Fetched {len(all_jobs)} jobs, {considered} eligible, "
           f"{len(new_jobs)} new to notify")
-    send(new_jobs)
+    send(new_jobs, header=alert_header(len(new_jobs)))
 
 def run_digest():
     """Daily mode (~midnight): summarize everything posted in the last

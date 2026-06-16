@@ -2,10 +2,10 @@ name: jobwatch
 
 on:
   schedule:
-    # ALERT mode — every 30 min. Pushes only fresh, not-yet-seen jobs.
+    # ALERT mode — every 30 min at :07 and :37. Pushes only fresh, not-yet-seen jobs.
     # GitHub cron is UTC. Free-tier scheduled runs can be delayed a few minutes
-    # at peak times; that's normal and not fixable by paying here.
-    - cron: "*/30 * * * *"
+    # at peak times; offset minutes avoid the busiest :00/:30 scheduler windows.
+    - cron: "7,37 * * * *"
     # DIGEST mode — once daily. 04:00 UTC = 00:00 Eastern (London, ON) in summer.
     # In winter (EST, UTC-5) this lands at 23:00 the previous day; close enough.
     - cron: "0 4 * * *"
