@@ -732,7 +732,7 @@ def notify_telegram(text):
 def notify_discord(blocks, header):
     """Send to a Discord webhook. blocks = list of per-job text chunks.
     Discord caps each message at 2000 chars, so we batch blocks under that.
-    Jobs are separated by a blank line for readability."""
+    Jobs are separated with a light divider for readability."""
     if not DISCORD_WEBHOOK:
         print("[discord] DISCORD_WEBHOOK not set")
         return
@@ -786,8 +786,8 @@ def format_block(j):
     if ago:
         bits.append(ago)
     line2 = " · ".join(bits)
-    line3 = f"<{j['url']}>" if j.get("url") else ""
-    lines = [line1]
+    line3 = j.get("url", "")
+    lines = ["---", line1]
     if line2:
         lines.append(line2)
     if j.get("note"):
