@@ -332,34 +332,45 @@ UNRELATED_MAJOR_RE = re.compile(
     re.I,
 )
 
-def matches(title, description=""):
+def match_reject_reason(title, description=""):
     t = title or ""
     blob = t + " " + (description or "")
     if not ROLE_RE.search(t):              # title must be a relevant role
-        return False
+        return "role"
     if not EARLY_RE.search(t):             # and must carry an early-career signal
-        return False
+        return "level"
     if OTHER_TERM_RE.search(blob):         # tagged as another term -> drop
-        return False
-    if any(x in blob.lower() for x in EXCLUDE):
-        return False
+        return "term"
     if CITIZENSHIP_RE.search(blob):
-        return False
+        return "citizenship"
     if FRENCH_REQUIRED_RE.search(blob):
-        return False
+        return "French"
+    if any(x in blob.lower() for x in EXCLUDE):
+        return "hard requirement"
     if UNRELATED_MAJOR_RE.search(blob):
-        return False
+        return "major"
     if INTERN_RE.search(t):
         if LONG_INTERNSHIP_RE.search(blob):
-            return False
+            return "duration"
         if not FALL_TERM_RE.search(blob):
-            return False
+            return "term"
     elif NEW_GRAD_RE.search(t):
         if not TERM_RE.search(blob):
-            return False
+            return "term"
     if FILTER_MODE == "strict":
-        return bool(TERM_RE.search(blob))  # must mention 2026/fall
-    return True                            # loose: keep early-career role
+        return None if TERM_RE.search(blob) else "term"
+    return None                            # loose: keep early-career role
+
+def matches(title, description=""):
+    return match_reject_reason(title, description) is None
+
+def reject_reason(title, description, location):
+    reason = match_reject_reason(title, description)
+    if reason:
+        return reason
+    if not location_ok(location):
+        return "location"
+    return None
 
 
 def location_ok(loc):
@@ -404,11 +415,11 @@ def fetch_greenhouse():
                 title = j.get("title", "")
                 loc = (j.get("location") or {}).get("name", "")
                 desc = j.get("content", "")
-                if matches(title, desc) and location_ok(loc):
-                    out.append({"title": title, "company": slug,
-                                "location": loc, "url": j.get("absolute_url", ""),
-                                "posted_ts": parse_iso(j.get("first_published")
-                                                        or j.get("updated_at"))})
+                out.append({"title": title, "company": slug,
+                            "location": loc, "url": j.get("absolute_url", ""),
+                            "posted_ts": parse_iso(j.get("first_published")
+                                                    or j.get("updated_at")),
+                            "reject_reason": reject_reason(title, desc, loc)})
         except Exception as e:
             print(f"[greenhouse:{slug}] {e}")
     return out
@@ -424,12 +435,12 @@ def fetch_lever():
                 title = j.get("text", "")
                 loc = (j.get("categories") or {}).get("location", "")
                 desc = j.get("descriptionPlain", "")
-                if matches(title, desc) and location_ok(loc):
-                    cts = j.get("createdAt")
-                    pts = int(cts / 1000) if isinstance(cts, (int, float)) else None
-                    out.append({"title": title, "company": slug,
-                                "location": loc, "url": j.get("hostedUrl", ""),
-                                "posted_ts": pts})
+                cts = j.get("createdAt")
+                pts = int(cts / 1000) if isinstance(cts, (int, float)) else None
+                out.append({"title": title, "company": slug,
+                            "location": loc, "url": j.get("hostedUrl", ""),
+                            "posted_ts": pts,
+                            "reject_reason": reject_reason(title, desc, loc)})
         except Exception as e:
             print(f"[lever:{slug}] {e}")
     return out
@@ -473,10 +484,10 @@ def fetch_workday():
                         loc = j.get("locationsText", "")
                         path = j.get("externalPath", "")
                         full = f"https://{host}{('/' + site) if site else ''}{path}"
-                        if matches(title, search) and location_ok(loc):
-                            out.append({"title": title, "company": name,
-                                        "location": loc, "url": full,
-                                        "posted_ts": parse_workday_posted(j.get("postedOn"))})
+                        out.append({"title": title, "company": name,
+                                    "location": loc, "url": full,
+                                    "posted_ts": parse_workday_posted(j.get("postedOn")),
+                                    "reject_reason": reject_reason(title, search, loc)})
                     offset += 20
                     if offset >= data.get("total", 0) or offset > 100:
                         break
@@ -506,14 +517,14 @@ def fetch_linkedin():
                 job_loc = loc_el.get_text(strip=True) if loc_el else loc
                 t_el = card.select_one("time")
                 pts = parse_iso(t_el.get("datetime")) if t_el else None
-                if matches(title, kw) and location_ok(job_loc):
-                    out.append({
-                        "title": title,
-                        "company": comp_el.get_text(strip=True) if comp_el else "",
-                        "location": job_loc,
-                        "url": a.get("href", "").split("?")[0],
-                        "posted_ts": pts,
-                    })
+                out.append({
+                    "title": title,
+                    "company": comp_el.get_text(strip=True) if comp_el else "",
+                    "location": job_loc,
+                    "url": a.get("href", "").split("?")[0],
+                    "posted_ts": pts,
+                    "reject_reason": reject_reason(title, kw, job_loc),
+                })
         except Exception as e:
             print(f"[linkedin] {e}")
     return out
@@ -540,14 +551,15 @@ def fetch_indeed():
                 title = parts[0] if parts else raw_title
                 company = parts[1] if len(parts) > 1 else "Indeed"
                 job_loc = parts[2] if len(parts) > 2 else loc
-                if matches(title, f"{kw} {desc}") and location_ok(job_loc):
-                    out.append({
-                        "title": title,
-                        "company": company,
-                        "location": job_loc,
-                        "url": link,
-                        "posted_ts": parse_rss_date(pub),
-                    })
+                match_text = f"{kw} {desc}"
+                out.append({
+                    "title": title,
+                    "company": company,
+                    "location": job_loc,
+                    "url": link,
+                    "posted_ts": parse_rss_date(pub),
+                    "reject_reason": reject_reason(title, match_text, job_loc),
+                })
         except Exception as e:
             print(f"[indeed] {e}")
     return out
@@ -580,16 +592,13 @@ def fetch_community():
                 locs = j.get("locations") or []
                 loc = ", ".join(locs) if isinstance(locs, list) else str(locs)
                 desc = json.dumps(j, ensure_ascii=False)
-                if not matches(title, desc):
-                    continue
-                if not location_ok(loc):
-                    continue
                 out.append({
                     "title": title,
                     "company": j.get("company_name", label),
                     "location": loc,
                     "url": j.get("url", ""),
                     "posted_ts": dp or None,
+                    "reject_reason": reject_reason(title, desc, loc),
                 })
         except Exception as e:
             print(f"[community:{label}] {e}")
@@ -672,6 +681,16 @@ def format_block(j):
         lines.append(line3)
     return "\n".join(lines)
 
+def compact_job_label(j):
+    title = j.get("title") or "Untitled"
+    company = j.get("company") or "Unknown"
+    return f"{title} — {company}"
+
+def add_example(stats, reason, job, limit=5):
+    examples = stats.setdefault("examples", [])
+    if len(examples) < limit:
+        examples.append((reason, compact_job_label(job)))
+
 def alert_header(count, stats=None):
     """Build the alert-mode Discord header."""
     now = datetime.now().strftime("%b %d %H:%M")
@@ -683,14 +702,20 @@ def alert_header(count, stats=None):
         f"Checked the last {ALERT_WINDOW_MINUTES // 60} hours.",
     ]
     if stats:
+        if stats.get("filtered"):
+            lines.append(f"{stats['filtered']} candidate(s) filtered before timing.")
         if stats.get("duplicate"):
             lines.append(
                 f"{stats['duplicate']} matching posting(s) were already sent before."
             )
         lines.append(
-            f"Fetched {stats['fetched']} matching candidate(s); "
+            f"Fetched {stats['fetched']} candidate(s); "
             f"{stats['in_window']} had usable times inside the window."
         )
+        if stats.get("examples"):
+            lines.append("Examples:")
+            for reason, label in stats["examples"]:
+                lines.append(f"- {reason}: {label}")
     return "\n".join(lines)
 
 def send(jobs, header=None):
@@ -758,23 +783,35 @@ def run_alert():
         "outside_window": 0,
         "in_window": 0,
         "duplicate": 0,
+        "filtered": 0,
+        "examples": [],
     }
     for j in all_jobs:
+        reason = j.get("reject_reason")
+        if reason:
+            stats["filtered"] += 1
+            if reason not in ("role", "level"):
+                add_example(stats, reason, j)
+            continue
         ts = j.get("posted_ts")
         if not ts:
             stats["no_time"] += 1
+            add_example(stats, "missing exact time", j)
             continue
         if is_date_only(ts):
             stats["date_only"] += 1
+            add_example(stats, "date only", j)
             continue
         if ts < cutoff:
             stats["outside_window"] += 1
+            add_example(stats, "outside 3h", j)
             continue
         stats["in_window"] += 1
         # Backstop: skip anything we've already notified about.
         uid = make_uid(j["company"], j["title"], j["url"])
         if not is_new(con, uid):
             stats["duplicate"] += 1
+            add_example(stats, "duplicate", j)
             continue
         new_jobs.append(j)
         mark_seen(con, uid)
@@ -791,6 +828,8 @@ def run_digest():
     # dedup within this run by uid (same posting from two sources)
     seen, todays = set(), []
     for j in all_jobs:
+        if j.get("reject_reason"):
+            continue
         ts = j.get("posted_ts")
         if not ts or ts < cutoff:
             continue
