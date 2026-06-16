@@ -360,6 +360,7 @@ LONG_INTERNSHIP_RE = re.compile(
     r"\b(year[\s-]*long|one\s*year|1\s*year)\b",
     re.I,
 )
+PHD_RE = re.compile(r"\b(ph\.?\s*d\.?|doctorate|doctoral)\b", re.I)
 CITIZENSHIP_RE = re.compile(
     r"\b(canadian\s+citizenship|required\s+canadian\s+citizenship|"
     r"canadian\s+citizens?\s+only|must\s+be\s+(?:a\s+)?canadian\s+citizen|"
@@ -388,12 +389,14 @@ UNRELATED_MAJOR_RE = re.compile(
 def match_reject_reason(title, description=""):
     t = title or ""
     blob = t + " " + (description or "")
-    if not ROLE_RE.search(t):              # title must be a relevant role
+    if not ROLE_RE.search(blob):
         return "role"
-    if not EARLY_RE.search(t):             # and must carry an early-career signal
+    if not EARLY_RE.search(blob):
         return "level"
     if OTHER_TERM_RE.search(blob):         # tagged as another term -> drop
         return "term"
+    if PHD_RE.search(blob):
+        return "PhD"
     if CITIZENSHIP_RE.search(blob):
         return "citizenship"
     if FRENCH_REQUIRED_RE.search(blob):
@@ -402,17 +405,21 @@ def match_reject_reason(title, description=""):
         return "hard requirement"
     if UNRELATED_MAJOR_RE.search(blob):
         return "major"
-    if INTERN_RE.search(t):
+    if INTERN_RE.search(blob):
         if LONG_INTERNSHIP_RE.search(blob):
             return "duration"
-        if not FALL_TERM_RE.search(blob):
-            return "term"
-    elif NEW_GRAD_RE.search(t):
-        if not TERM_RE.search(blob):
-            return "term"
     if FILTER_MODE == "strict":
         return None if TERM_RE.search(blob) else "term"
     return None                            # loose: keep early-career role
+
+def match_note(title, description=""):
+    t = title or ""
+    blob = t + " " + (description or "")
+    if INTERN_RE.search(blob) and not FALL_TERM_RE.search(blob):
+        return "term/duration not explicit; please verify"
+    if NEW_GRAD_RE.search(blob) and not TERM_RE.search(blob):
+        return "start term not explicit; please verify"
+    return ""
 
 def matches(title, description=""):
     return match_reject_reason(title, description) is None
@@ -422,7 +429,7 @@ def reject_reason(title, description, location):
     if reason:
         return reason
     if not location_ok(location):
-        return "location"
+        return "location (not Canada)"
     return None
 
 
@@ -472,7 +479,8 @@ def fetch_greenhouse():
                             "location": loc, "url": j.get("absolute_url", ""),
                             "posted_ts": parse_iso(j.get("first_published")
                                                     or j.get("updated_at")),
-                            "reject_reason": reject_reason(title, desc, loc)})
+                            "reject_reason": reject_reason(title, desc, loc),
+                            "note": match_note(title, desc)})
         except Exception as e:
             print(f"[greenhouse:{slug}] {e}")
     return out
@@ -493,7 +501,8 @@ def fetch_lever():
                 out.append({"title": title, "company": slug,
                             "location": loc, "url": j.get("hostedUrl", ""),
                             "posted_ts": pts,
-                            "reject_reason": reject_reason(title, desc, loc)})
+                            "reject_reason": reject_reason(title, desc, loc),
+                            "note": match_note(title, desc)})
         except Exception as e:
             print(f"[lever:{slug}] {e}")
     return out
@@ -532,6 +541,7 @@ def fetch_ashby():
                     "url": j.get("jobUrl") or j.get("applyUrl") or "",
                     "posted_ts": parse_iso(posted),
                     "reject_reason": reject_reason(title, desc, loc),
+                    "note": match_note(title, desc),
                 })
         except Exception as e:
             print(f"[ashby:{slug}] {e}")
@@ -579,7 +589,8 @@ def fetch_workday():
                         out.append({"title": title, "company": name,
                                     "location": loc, "url": full,
                                     "posted_ts": parse_workday_posted(j.get("postedOn")),
-                                    "reject_reason": reject_reason(title, search, loc)})
+                                    "reject_reason": reject_reason(title, search, loc),
+                                    "note": match_note(title, search)})
                     offset += 20
                     if offset >= data.get("total", 0) or offset > 100:
                         break
@@ -616,6 +627,7 @@ def fetch_linkedin():
                     "url": a.get("href", "").split("?")[0],
                     "posted_ts": pts,
                     "reject_reason": reject_reason(title, kw, job_loc),
+                    "note": match_note(title, kw),
                 })
         except Exception as e:
             print(f"[linkedin] {e}")
@@ -651,6 +663,7 @@ def fetch_indeed():
                     "url": link,
                     "posted_ts": parse_rss_date(pub),
                     "reject_reason": reject_reason(title, match_text, job_loc),
+                    "note": match_note(title, match_text),
                 })
         except Exception as e:
             print(f"[indeed] {e}")
@@ -691,6 +704,7 @@ def fetch_community():
                     "url": j.get("url", ""),
                     "posted_ts": dp or None,
                     "reject_reason": reject_reason(title, desc, loc),
+                    "note": match_note(title, desc),
                 })
         except Exception as e:
             print(f"[community:{label}] {e}")
@@ -769,6 +783,8 @@ def format_block(j):
     lines = [line1]
     if line2:
         lines.append(line2)
+    if j.get("note"):
+        lines.append(f"Note: {j['note']}")
     if line3:
         lines.append(line3)
     return "\n".join(lines)
