@@ -71,7 +71,7 @@ FILTER_MODE = "loose"
 # Each alert run only notifies about jobs whose minute-precise posting time
 # falls within this window. The dedup DB still prevents repeats if a job appears
 # in overlapping runs.
-ALERT_WINDOW_MINUTES = 30
+ALERT_WINDOW_MINUTES = 180
 
 # --- Daily digest ---
 # A separate "digest" run (meant for ~midnight) summarizes everything posted
@@ -677,7 +677,7 @@ def alert_header(count):
     if count:
         noun = "posting" if count == 1 else "postings"
         return f"**Jobwatch: {count} new {noun}** · {now}\nCanada · Sep-Dec internships / Sep+ new grad"
-    return f"**Jobwatch: 0 new postings** · {now}\nChecked the last {ALERT_WINDOW_MINUTES} minutes."
+    return f"**Jobwatch: 0 new postings** · {now}\nChecked the last {ALERT_WINDOW_MINUTES // 60} hours."
 
 def send(jobs, header=None):
     if header is None:
