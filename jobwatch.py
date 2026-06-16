@@ -360,6 +360,11 @@ LONG_INTERNSHIP_RE = re.compile(
     r"\b(year[\s-]*long|one\s*year|1\s*year)\b",
     re.I,
 )
+SENIORITY_EXCLUDE_RE = re.compile(
+    r"\b(senior|sr\.?|staff|principal|lead|manager|director|head\s+of|"
+    r"architect|distinguished|executive|vp|vice\s+president)\b",
+    re.I,
+)
 PHD_RE = re.compile(r"\b(ph\.?\s*d\.?|doctorate|doctoral)\b", re.I)
 CITIZENSHIP_RE = re.compile(
     r"\b(canadian\s+citizenship|required\s+canadian\s+citizenship|"
@@ -393,6 +398,8 @@ def match_reject_reason(title, description=""):
         return "role"
     if not EARLY_RE.search(blob):
         return "level"
+    if SENIORITY_EXCLUDE_RE.search(blob):
+        return "seniority"
     if OTHER_TERM_RE.search(blob):         # tagged as another term -> drop
         return "term"
     if PHD_RE.search(blob):
@@ -802,13 +809,14 @@ def add_example(stats, reason, job, limit=5):
 def alert_header(count, stats=None):
     """Build the alert-mode Discord header."""
     now = datetime.now().strftime("%b %d %H:%M")
-    if count:
-        noun = "posting" if count == 1 else "postings"
-        return f"**Jobwatch: {count} new {noun}** · {now}\nCanada · Sep-Dec internships / Sep+ new grad"
+    noun = "posting" if count == 1 else "postings"
     lines = [
-        f"**Jobwatch: 0 new postings** · {now}",
+        f"**Jobwatch: {count} new {noun}** · {now}",
+        "Canada · Sep-Dec internships / Sep+ new grad",
         f"Checked the last {ALERT_WINDOW_MINUTES // 60} hours.",
     ]
+    if count:
+        lines.append("")
     if stats:
         if stats.get("filtered"):
             lines.append(f"{stats['filtered']} candidate(s) filtered before timing.")
