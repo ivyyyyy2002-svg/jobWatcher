@@ -835,11 +835,6 @@ def alert_header(count, stats=None):
         lines.append(f"window {alert_window_label()}")
         if count:
             lines.append("")
-    if stats:
-        if stats.get("examples"):
-            lines.append("Filtered examples:")
-            for reason, label in stats["examples"]:
-                lines.append(f"- {reason}: {label}")
     return "\n".join(lines)
 
 def send(jobs, header=None):
