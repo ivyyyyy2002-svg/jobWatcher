@@ -1,0 +1,55 @@
+name: jobwatch
+
+# Runs the job watcher on a schedule (and lets you trigger it manually).
+on:
+  schedule:
+    # Every 30 minutes. GitHub cron is UTC; interval timing is what matters here.
+    # NOTE: scheduled runs on free GitHub can be delayed a few minutes at peak
+    # times — this is normal and not something you can pay your way out of here.
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}   # manual "Run workflow" button
+
+# Allow the workflow to push the updated dedup DB back to the repo.
+permissions:
+  contents: write
+
+# Never run two copies at once (they'd fight over the DB commit).
+concurrency:
+  group: jobwatch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml
+
+      - name: Run jobwatch
+        env:
+          # From repo Settings -> Secrets and variables -> Actions
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          # Keep the dedup DB at the repo root so we can commit it back.
+          JOBWATCH_DB: seen_jobs.db
+        run: python jobwatch.py
+
+      - name: Persist dedup database
+        # Commit the updated DB so the next run remembers what it already sent.
+        run: |
+          if [[ -n "$(git status --porcelain seen_jobs.db)" ]]; then
+            git config user.name "jobwatch-bot"
+            git config user.email "jobwatch-bot@users.noreply.github.com"
+            git add seen_jobs.db
+            git commit -m "update seen jobs [skip ci]"
+            git push
+          else
+            echo "No DB changes to commit."
+          fi

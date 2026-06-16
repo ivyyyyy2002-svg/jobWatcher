@@ -1,0 +1,561 @@
+#!/usr/bin/env python3
+"""
+jobwatch.py - watcher for 2026 Fall intern / new-grad / entry-level roles
+
+monitoring sources:
+  - Greenhouse (public JSON API, most reliable)
+  - Lever     (public JSON API, most reliable)
+  - Workday   (per-company subdomain, configure individually)
+  - LinkedIn  (guest endpoint, may get rate-limited)
+  - Indeed    (RSS, may break)
+
+Flow: pull all sources -> keyword filter -> diff against last run -> only push NEW jobs.
+Run every 30 min via cron / scheduled task.
+
+Deps: pip install requests beautifulsoup4 lxml
+"""
+
+import json
+import os
+import re
+import time
+import hashlib
+import sqlite3
+import smtplib
+from email.mime.text import MIMEText
+from datetime import datetime, timezone
+
+import requests
+from bs4 import BeautifulSoup
+
+# ============================================================
+# 1. Config - edit here
+# ============================================================
+
+# --- Keyword filter ---
+# Role keywords: word-boundary match to avoid false hits like "Internal"/"International".
+# Covers both internships and full-time early-career / new-grad roles.
+ROLE_RE = re.compile(
+    r"\b(intern|internship|co-?op|new\s*grad|graduate|entry[\s-]*level|"
+    r"early\s*career|early[\s-]*talent|student|university|junior|associate\s+engineer|"
+    r"engineer(ing)?|developer|software)\b|实习",
+    re.I,
+)
+# Term signal words (Fall 2026). Hitting any one counts as the target term.
+TERM_RE = re.compile(r"\b(2026|fall|autumn|september|sept)\b", re.I)
+# Explicitly belongs to another term -> drop it.
+OTHER_TERM_RE = re.compile(r"\b(summer|spring|winter)\s*20(25|27)\b|\b2025\b|\b2027\b", re.I)
+# Extra exclude words.
+EXCLUDE = ["phd only"]
+
+# Filter mode:
+#   "strict" = must be a target role AND mention 2026/fall
+#   "loose"  = target role and not tagged as another term (best early in the cycle)
+FILTER_MODE = "loose"
+
+# --- Location filter ---
+# Two modes:
+#   "blacklist" = drop jobs whose location matches LOCATION_EXCLUDE
+#   "whitelist" = keep ONLY jobs whose location matches LOCATION_INCLUDE
+# Whitelist is more reliable for "Canada + China + remote, no US" because you
+# can't enumerate every US city, but you CAN enumerate the places you want.
+LOCATION_MODE = "whitelist"
+
+# Whitelist: keep a job only if its location contains any of these.
+# Canada only (no remote, no China) per your request.
+LOCATION_INCLUDE = [
+    "canada", "ontario", "quebec", "british columbia", "alberta",
+    "manitoba", "saskatchewan", "nova scotia", "new brunswick",
+    "toronto", "vancouver", "montreal", "ottawa", "waterloo", "kitchener",
+    "calgary", "edmonton", "mississauga", "hamilton", "halifax", "winnipeg",
+    "victoria", "kingston", "oshawa", "oakville", "burnaby", "markham",
+    "richmond hill", "brampton", "guelph", "windsor", "regina", "saskatoon",
+    ", on", ", bc", ", qc", ", ab", ", mb", ", sk", ", ns", ", nb", ", nl",
+]
+# Blacklist (only used when LOCATION_MODE == "blacklist").
+LOCATION_EXCLUDE = [
+    "united states", "usa", "u.s.", "u.s.a", ", us",
+    "california", "new york", "san francisco", "seattle", "austin",
+    "boston", "chicago", "atlanta", "denver", "los angeles", "texas",
+    "washington", "remote - us", "us-remote", "us remote",
+]
+# If a location string is empty/unknown: under whitelist we DROP it (could be US
+# with a blank field). Set True only if you'd rather keep unknowns.
+KEEP_UNKNOWN_LOCATION = False
+
+# --- Community repos (Simplify / Vansh listings.json) ---
+# These aggregate tens of thousands of postings scraped from company career
+# pages. We read their raw JSON directly = their coverage UNION your own ATS.
+# Set to [] to disable. Each entry: (label, raw_json_url)
+COMMUNITY_REPOS = [
+    ("Simplify-Intern",
+     "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/.github/scripts/listings.json"),
+    ("Simplify-NewGrad",
+     "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json"),
+    ("Vansh-Intern",
+     "https://raw.githubusercontent.com/vanshb03/Summer2026-Internships/dev/.github/scripts/listings.json"),
+]
+# Only keep community postings newer than this many days (avoid back-flooding
+# with thousands of old entries on first run). Set to 0 for no age limit.
+COMMUNITY_MAX_AGE_DAYS = 14
+
+# --- Greenhouse: board token (the slug in the careers-page URL) ---
+# e.g. https://boards.greenhouse.io/stripe -> "stripe"
+# All slugs below were verified live. Empty ones cost nothing; trim as you like.
+GREENHOUSE_COMPANIES = [
+    "stripe", "databricks", "airbnb", "robinhood", "coinbase", "instacart",
+    "samsara", "figma", "brex", "gusto", "flexport", "affirm", "reddit",
+    "pinterest", "dropbox", "asana", "twitch", "cloudflare", "datadog",
+    "elastic", "gitlab", "okta", "twilio", "sofi", "chime", "faire", "vercel",
+    "anthropic", "airtable", "attentive", "webflow", "calendly", "duolingo",
+    "discord", "roblox", "nuro", "wayve", "verkada", "waymo", "lyft",
+    "sigmacomputing", "mixpanel", "amplitude", "coursera", "khanacademy",
+    "nubank", "adyen", "monzo", "n26", "gocardless", "betterment", "marqeta",
+    "toast", "block", "project44", "phonepe", "groww", "postman",
+]
+
+# --- Lever: same idea, fill in the company slug ---
+# e.g. https://jobs.lever.co/netflix -> "netflix"
+# All slugs below verified live.
+LEVER_COMPANIES = [
+    "palantir", "spotify", "mistral", "shieldai", "matchgroup",
+    "outreach", "highspot", "people-ai", "tala", "wealthfront",
+    "alloy", "velo3d", "whoop", "15five", "angellist",
+]
+
+# --- Workday: 每家独立, 格式 (公司名, 子域host, tenant, 站点路径) ---
+# Careers URL looks like https://<host>/wday/cxs/<tenant>/<site>/jobs
+# e.g. NVIDIA -> ("NVIDIA","nvidia.wd5.myworkdayjobs.com","nvidia","NVIDIAExternalCareerSite")
+WORKDAY_COMPANIES = [
+    ("NVIDIA",     "nvidia.wd5.myworkdayjobs.com",      "nvidia",     "NVIDIAExternalCareerSite"),
+    ("Salesforce", "salesforce.wd12.myworkdayjobs.com", "salesforce", "External_Career_Site"),
+    ("Adobe",      "adobe.wd5.myworkdayjobs.com",        "adobe",      "external_experienced"),
+    ("HP",         "hp.wd5.myworkdayjobs.com",           "hp",         "ExternalCareerSite"),
+    ("PayPal",     "paypal.wd1.myworkdayjobs.com",       "paypal",     "jobs"),
+    ("Autodesk",   "autodesk.wd1.myworkdayjobs.com",     "autodesk",   "Ext"),
+    ("Sony",       "sonyglobal.wd1.myworkdayjobs.com",   "sonyglobal", "SonyGlobalCareers"),
+    ("Mastercard", "mastercard.wd1.myworkdayjobs.com",   "mastercard", "CorporateCareers"),
+    ("TD Bank",    "td.wd3.myworkdayjobs.com",           "td",         "TD_Bank_Careers"),
+    ("Workday",    "workday.wd5.myworkdayjobs.com",       "workday",    "Workday"),
+]
+
+# --- LinkedIn search keywords / location ---
+LINKEDIN_QUERIES = [
+    ("software engineer intern 2026", "Canada"),
+    ("new grad software engineer 2026", "Canada"),
+]
+
+# --- Notification method: pick one ---
+NOTIFY = "discord"   # "discord" | "telegram" | "email" | "print"
+
+# Discord: paste your channel webhook URL (Server Settings -> Integrations ->
+# Webhooks -> New Webhook -> Copy Webhook URL). Stored as an env var/secret.
+DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "")
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.environ.get("TG_CHAT_ID", "")
+
+EMAIL_FROM = os.environ.get("MAIL_FROM", "")
+EMAIL_PASS = os.environ.get("MAIL_PASS", "")   # app password, not your login password
+EMAIL_TO   = os.environ.get("MAIL_TO", "")
+SMTP_HOST  = "smtp.gmail.com"
+SMTP_PORT  = 587
+
+DB_PATH = os.environ.get(
+    "JOBWATCH_DB",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "seen_jobs.db"),
+)
+HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"}
+TIMEOUT = 20
+
+# ============================================================
+# 2. Database (dedup) - track jobs already pushed
+# ============================================================
+
+def db_init():
+    con = sqlite3.connect(DB_PATH)
+    con.execute("CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY, ts TEXT)")
+    con.commit()
+    return con
+
+def is_new(con, uid):
+    cur = con.execute("SELECT 1 FROM seen WHERE id=?", (uid,))
+    return cur.fetchone() is None
+
+def mark_seen(con, uid):
+    con.execute("INSERT OR IGNORE INTO seen(id, ts) VALUES(?,?)",
+                (uid, datetime.now(timezone.utc).isoformat()))
+    con.commit()
+
+def make_uid(*parts):
+    return hashlib.sha256("||".join(str(p) for p in parts).encode()).hexdigest()[:16]
+
+def parse_iso(s):
+    """ISO-8601 string -> Unix seconds, or None."""
+    if not s:
+        return None
+    try:
+        from datetime import datetime as _dt
+        s = s.replace("Z", "+00:00")
+        return int(_dt.fromisoformat(s).timestamp())
+    except Exception:
+        return None
+
+def humanize_age(ts):
+    """Unix seconds -> ('2026-06-16 14:05', '23m ago'). Returns ('','') if None."""
+    if not ts:
+        return ("", "")
+    try:
+        dt = datetime.fromtimestamp(ts)
+        stamp = dt.strftime("%Y-%m-%d %H:%M")
+        secs = max(0, int(time.time() - ts))
+        if secs < 3600:
+            ago = f"{secs // 60}m ago"
+        elif secs < 86400:
+            ago = f"{secs // 3600}h ago"
+        else:
+            ago = f"{secs // 86400}d ago"
+        return (stamp, ago)
+    except Exception:
+        return ("", "")
+
+# ============================================================
+# 3. Keyword filter
+# ============================================================
+
+# Early-career signal: at least one of these must be present, otherwise a plain
+# "Software Engineer" (senior) would slip through.
+EARLY_RE = re.compile(
+    r"\b(intern|internship|co-?op|new\s*grad|graduate|entry[\s-]*level|"
+    r"early\s*career|early[\s-]*talent|student|university|junior)\b|实习",
+    re.I,
+)
+
+def matches(title, description=""):
+    t = title or ""
+    blob = t + " " + (description or "")
+    if not ROLE_RE.search(t):              # title must be a relevant role
+        return False
+    if not EARLY_RE.search(t):             # and must carry an early-career signal
+        return False
+    if OTHER_TERM_RE.search(blob):         # tagged as another term -> drop
+        return False
+    if any(x in blob.lower() for x in EXCLUDE):
+        return False
+    if FILTER_MODE == "strict":
+        return bool(TERM_RE.search(blob))  # must mention 2026/fall
+    return True                            # loose: keep early-career role
+
+
+def location_ok(loc):
+    """Decide whether to keep a job based on its location string."""
+    if not loc or not loc.strip():
+        return KEEP_UNKNOWN_LOCATION
+    low = loc.lower()
+    if LOCATION_MODE == "whitelist":
+        # Guard: a "remote" string that also names a US place is still US.
+        us_markers = ["united states", "usa", "u.s", ", us", "- us", "-us",
+                      "remote us", "us remote", "us-remote", "remote-us",
+                      "(us)", "(usa)", "u.s.",
+                      "california", "new york", "san francisco", "seattle",
+                      "austin", "boston", "chicago", "atlanta", "denver",
+                      "los angeles", "texas", ", ca", ", wa", ", ny", ", tx",
+                      ", ma", ", il", ", co", ", ga", ", fl", ", or", ", nj"]
+        has_include = any(x in low for x in LOCATION_INCLUDE)
+        has_us = any(x in low for x in us_markers)
+        if not has_include:
+            return False
+        # If it matched only via "remote" but also carries a US marker, drop it.
+        if has_us and not any(
+            x in low for x in LOCATION_INCLUDE if x != "remote"
+        ):
+            return False
+        return True
+    # blacklist mode
+    return not any(x in low for x in LOCATION_EXCLUDE)
+
+# ============================================================
+# 4. Fetchers - each returns [{title, company, location, url}]
+# ============================================================
+
+def fetch_greenhouse():
+    out = []
+    for slug in GREENHOUSE_COMPANIES:
+        url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+            r.raise_for_status()
+            for j in r.json().get("jobs", []):
+                title = j.get("title", "")
+                loc = (j.get("location") or {}).get("name", "")
+                desc = j.get("content", "")
+                if matches(title, desc) and location_ok(loc):
+                    out.append({"title": title, "company": slug,
+                                "location": loc, "url": j.get("absolute_url", ""),
+                                "posted_ts": parse_iso(j.get("first_published")
+                                                        or j.get("updated_at"))})
+        except Exception as e:
+            print(f"[greenhouse:{slug}] {e}")
+    return out
+
+def fetch_lever():
+    out = []
+    for slug in LEVER_COMPANIES:
+        url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+            r.raise_for_status()
+            for j in r.json():
+                title = j.get("text", "")
+                loc = (j.get("categories") or {}).get("location", "")
+                desc = j.get("descriptionPlain", "")
+                if matches(title, desc) and location_ok(loc):
+                    cts = j.get("createdAt")
+                    pts = int(cts / 1000) if isinstance(cts, (int, float)) else None
+                    out.append({"title": title, "company": slug,
+                                "location": loc, "url": j.get("hostedUrl", ""),
+                                "posted_ts": pts})
+        except Exception as e:
+            print(f"[lever:{slug}] {e}")
+    return out
+
+def parse_workday_posted(text):
+    """'Posted 3 Days Ago' / 'Posted Today' -> approx Unix seconds."""
+    if not text:
+        return None
+    t = text.lower()
+    now = time.time()
+    if "today" in t:
+        return int(now)
+    if "yesterday" in t:
+        return int(now - 86400)
+    m = re.search(r"(\d+)\+?\s*day", t)
+    if m:
+        return int(now - int(m.group(1)) * 86400)
+    m = re.search(r"(\d+)\+?\s*month", t)
+    if m:
+        return int(now - int(m.group(1)) * 30 * 86400)
+    return None
+
+def fetch_workday():
+    out = []
+    for name, host, tenant, site in WORKDAY_COMPANIES:
+        url = f"https://{host}/wday/cxs/{tenant}/{site}/jobs"
+        for search in ("intern", "new grad", "co-op"):
+            try:
+                offset = 0
+                while True:
+                    payload = {"appliedFacets": {}, "limit": 20, "offset": offset,
+                               "searchText": search}
+                    r = requests.post(url, json=payload, headers=HEADERS, timeout=TIMEOUT)
+                    r.raise_for_status()
+                    data = r.json()
+                    postings = data.get("jobPostings", [])
+                    if not postings:
+                        break
+                    for j in postings:
+                        title = j.get("title", "")
+                        loc = j.get("locationsText", "")
+                        path = j.get("externalPath", "")
+                        full = f"https://{host}{('/' + site) if site else ''}{path}"
+                        if matches(title) and location_ok(loc):
+                            out.append({"title": title, "company": name,
+                                        "location": loc, "url": full,
+                                        "posted_ts": parse_workday_posted(j.get("postedOn"))})
+                    offset += 20
+                    if offset >= data.get("total", 0) or offset > 100:
+                        break
+            except Exception as e:
+                print(f"[workday:{name}:{search}] {e}")
+    return out
+
+def fetch_linkedin():
+    out = []
+    base = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+    for kw, loc in LINKEDIN_QUERIES:
+        try:
+            params = {"keywords": kw, "location": loc, "f_TPR": "r86400", "start": 0}
+            r = requests.get(base, params=params, headers=HEADERS, timeout=TIMEOUT)
+            if r.status_code != 200:
+                print(f"[linkedin] status {r.status_code} (possibly rate-limited)")
+                continue
+            soup = BeautifulSoup(r.text, "html.parser")
+            for card in soup.select("li"):
+                a = card.select_one("a.base-card__full-link") or card.select_one("a")
+                title_el = card.select_one("h3")
+                comp_el = card.select_one("h4")
+                loc_el = card.select_one(".job-search-card__location")
+                if not (a and title_el):
+                    continue
+                title = title_el.get_text(strip=True)
+                job_loc = loc_el.get_text(strip=True) if loc_el else loc
+                t_el = card.select_one("time")
+                pts = parse_iso(t_el.get("datetime")) if t_el else None
+                if matches(title) and location_ok(job_loc):
+                    out.append({
+                        "title": title,
+                        "company": comp_el.get_text(strip=True) if comp_el else "",
+                        "location": job_loc,
+                        "url": a.get("href", "").split("?")[0],
+                        "posted_ts": pts,
+                    })
+        except Exception as e:
+            print(f"[linkedin] {e}")
+    return out
+
+def fetch_community():
+    """Read Simplify / Vansh listings.json directly. This is the big multiplier:
+    their scrapers cover hundreds of companies, and we union it with our own."""
+    out = []
+    cutoff = 0
+    if COMMUNITY_MAX_AGE_DAYS > 0:
+        cutoff = time.time() - COMMUNITY_MAX_AGE_DAYS * 86400
+    for label, url in COMMUNITY_REPOS:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=40)
+            if r.status_code != 200:
+                print(f"[community:{label}] status {r.status_code}")
+                continue
+            data = json.loads(r.text)
+            for j in data:
+                if not j.get("active", True) or not j.get("is_visible", True):
+                    continue
+                dp = j.get("date_posted") or j.get("date_updated") or 0
+                try:
+                    dp = int(dp)
+                except (TypeError, ValueError):
+                    dp = 0
+                if cutoff and dp and dp < cutoff:
+                    continue
+                title = j.get("title", "")
+                locs = j.get("locations") or []
+                loc = ", ".join(locs) if isinstance(locs, list) else str(locs)
+                if not matches(title):
+                    continue
+                if not location_ok(loc):
+                    continue
+                out.append({
+                    "title": title,
+                    "company": j.get("company_name", label),
+                    "location": loc,
+                    "url": j.get("url", ""),
+                    "posted_ts": dp or None,
+                })
+        except Exception as e:
+            print(f"[community:{label}] {e}")
+    return out
+
+# ============================================================
+# 5. Notifications
+# ============================================================
+
+def notify_telegram(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try:
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text,
+                                 "disable_web_page_preview": True}, timeout=TIMEOUT)
+    except Exception as e:
+        print(f"[telegram] {e}")
+
+def notify_discord(blocks, header):
+    """Send to a Discord webhook. blocks = list of per-job text chunks.
+    Discord caps each message at 2000 chars, so we batch blocks under that."""
+    if not DISCORD_WEBHOOK:
+        print("[discord] DISCORD_WEBHOOK not set")
+        return
+    LIMIT = 1900  # leave headroom under Discord's 2000-char cap
+    batch, size = [header], len(header)
+    def flush(b):
+        if not b:
+            return
+        try:
+            r = requests.post(DISCORD_WEBHOOK, json={"content": "\n".join(b)},
+                              timeout=TIMEOUT)
+            if r.status_code not in (200, 204):
+                print(f"[discord] status {r.status_code}: {r.text[:120]}")
+        except Exception as e:
+            print(f"[discord] {e}")
+        time.sleep(0.7)  # stay under webhook rate limit
+    for blk in blocks:
+        if size + len(blk) + 1 > LIMIT:
+            flush(batch)
+            batch, size = [], 0
+        batch.append(blk)
+        size += len(blk) + 1
+    flush(batch)
+
+def notify_email(text):
+    msg = MIMEText(text, "plain", "utf-8")
+    msg["Subject"] = f"New job alert {datetime.now():%m-%d %H:%M}"
+    msg["From"] = EMAIL_FROM
+    msg["To"] = EMAIL_TO
+    try:
+        s = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=TIMEOUT)
+        s.starttls()
+        s.login(EMAIL_FROM, EMAIL_PASS)
+        s.sendmail(EMAIL_FROM, [EMAIL_TO], msg.as_string())
+        s.quit()
+    except Exception as e:
+        print(f"[email] {e}")
+
+def send(jobs):
+    if not jobs:
+        return
+    # Newest first: jobs with a known posting time, most recent at top;
+    # unknown-time jobs go last.
+    jobs = sorted(jobs, key=lambda j: j.get("posted_ts") or 0, reverse=True)
+    header = f"🔔 {len(jobs)} new jobs ({datetime.now():%m-%d %H:%M})\n"
+    blocks = []
+    for j in jobs:
+        stamp, ago = humanize_age(j.get("posted_ts"))
+        head = f"• {j['title']} @ {j['company']}"
+        if ago:
+            head += f"  🕒 {ago}"
+        parts = [head]
+        meta = []
+        if j.get("location"):
+            meta.append(f"📍 {j['location']}")
+        if stamp:
+            meta.append(f"posted {stamp}")
+        if meta:
+            parts.append("  " + " | ".join(meta))
+        parts.append(f"  {j['url']}")
+        blocks.append("\n".join(parts))
+
+    if NOTIFY == "discord":
+        notify_discord(blocks, header)
+    elif NOTIFY == "telegram":
+        notify_telegram(header + "\n" + "\n\n".join(blocks))
+    elif NOTIFY == "email":
+        notify_email(header + "\n" + "\n\n".join(blocks))
+    else:
+        print(header + "\n" + "\n\n".join(blocks))
+
+# ============================================================
+# 6. Main
+# ============================================================
+
+def main():
+    con = db_init()
+    all_jobs = []
+    for fn in (fetch_greenhouse, fetch_lever, fetch_workday,
+               fetch_community, fetch_linkedin):
+        try:
+            all_jobs.extend(fn())
+        except Exception as e:
+            print(f"[{fn.__name__}] {e}")
+        time.sleep(1)  # be polite
+
+    new_jobs = []
+    for j in all_jobs:
+        uid = make_uid(j["company"], j["title"], j["url"])
+        if is_new(con, uid):
+            new_jobs.append(j)
+            mark_seen(con, uid)
+
+    print(f"Fetched {len(all_jobs)} jobs, {len(new_jobs)} new")
+    send(new_jobs)
+
+if __name__ == "__main__":
+    main()
