@@ -1,85 +1,81 @@
-# jobwatch 部署教程（GitHub Actions，全程免费）
+# jobwatch Deployment Guide (GitHub Actions, Free)
 
-配完之后：你的电脑可以关机，GitHub 的服务器自动跑：
+After setup, your computer can be turned off. GitHub Actions will run the watcher on GitHub's servers.
 
-- **平时（每 30 分钟）**：检查最近 1 小时内发布的岗位。对有精确发布时间的来源
-  （公司官网 ATS、社区聚合源），做到增量提醒——只推最近窗口内
-  新发布的；没有新岗位也会发一条简短状态提示。对只提供日期、不能精确到分钟
-  的来源，会在平时提醒里跳过，避免把很多小时前的岗位当成刚发布。
-- **每天凌晨（东部时间午夜到凌晨 1 点左右）**：发一份"当日汇总"，
-  把过去 24 小时发布的岗位归总一次，方便回顾。
+- **Regular alerts, every 30 minutes**: checks jobs posted in the last 1 hour. For sources with precise posting times, such as company ATS boards and community feeds, the watcher sends only newly posted jobs inside the current window. If there are no new jobs, it still sends a short status message. Sources that only provide a date, without a precise time, are skipped in regular alerts so old jobs are not treated as fresh.
+- **Daily digest, around midnight to 1 AM Eastern time**: sends a 24-hour summary of all matching jobs from the day, grouped in a cleaner format for review.
 
-消息里带发布时间和"多久前发布"，最新的排最前面，每条之间有空行，链接不展开成大卡片。
+Messages include posting time or age when available, with the newest jobs first. Each posting is separated clearly, and links are left as plain URLs so Discord can show its own preview card when available.
 
-当前筛选规则：
-- 地点限制在加拿大；Remote 也可以，但必须能看出是 Canada / 加拿大范围。
-- Intern / co-op 只要 Fall 2026 / September-December / 4-month 这类 9-12 月岗位。
-  明确写 6、8、12、16 个月或一年制的实习会跳过。
-- New grad / entry-level / junior 这类岗位，只要是 2026 或 9 月之后可开始即可。
-- 明确要求 Canadian citizenship 的岗位会跳过。
-- 硬性要求 French / bilingual French 的岗位会跳过。
-- 明确硬性限制明显不相关专业（如 accounting、nursing、mechanical/civil/chemical engineering 等）的岗位会跳过。
-- 来源包括公司 ATS（Greenhouse / Lever / Ashby / Workday）、社区聚合源、
-  LinkedIn 和 Indeed。查询词会覆盖 software、developer、co-op、data、QA、
-  cloud/devops/security、IT、technology analyst、junior/new grad 等方向。
+Current filtering rules:
 
-> 关于精度：能精确到分钟的来源（ATS / 社区源）就按"最近 N 分钟"窗口推，
-> 尽量做到一发布就提醒；LinkedIn 如果只给日期不给时间，没法证明它属于最近
-> 1 小时，所以平时提醒会跳过这类不精确时间，避免旧岗位刷屏。
-> 第一次跑会建立基线（推一小批最近的），之后每次只推真正的新增。
+- Location must be in Canada. Remote roles are allowed only when the posting clearly supports Canada.
+- Intern / co-op roles must fit Fall 2026, September-December, or a 4-month term. Internships explicitly listed as 6, 8, 12, 16 months, or year-long are skipped.
+- New grad / entry-level / junior roles are allowed if they are for 2026 or can start in September or later.
+- Jobs that explicitly require Canadian citizenship are skipped.
+- Jobs with a hard French or bilingual French requirement are skipped.
+- Senior, staff, principal, lead, manager, director, architect, executive, VP, and similar senior-level roles are skipped.
+- PhD / doctorate-only roles are skipped.
+- Jobs with hard requirements for clearly unrelated majors, such as accounting, nursing, mechanical engineering, civil engineering, or chemical engineering, are skipped.
+- If the title is vague but the description looks relevant and has no hard blocker, the job can still be sent with a note such as `term/duration not explicit; please verify`.
+- Sources include company ATS boards, community feeds, LinkedIn, and Indeed. The search terms are intentionally broad, while the filtering rules decide what actually gets sent.
+
+Precision note:
+
+Sources with minute-level timestamps are checked against the alert window. LinkedIn or other sources that only show a date cannot prove that a job was posted inside the last hour, so they are skipped in regular alerts to avoid noisy old posts. The first run establishes the baseline; later runs only send new matches that were not already sent before.
 
 ---
 
-## 你会用到的 3 个文件
-- `jobwatch.py`        ——主脚本
-- `jobwatch.yml`       ——GitHub Actions 定时任务配置
-- `requirements.txt`   ——依赖清单
+## Files
+
+- `jobwatch.py` - main watcher script
+- `jobwatch.yml` - GitHub Actions workflow configuration
+- `requirements.txt` - Python dependencies
 
 ---
 
-## 第 1 步：建一个 Discord Webhook（约 2 分钟）
+## Step 1: Create a Discord Webhook
 
-Webhook 就是一个"往某个频道发消息"的专属网址，不用建机器人，复制一个 URL 就行。
+A webhook is a private URL that can post messages into one Discord channel. You do not need to build a Discord bot.
 
-1. 打开 Discord。如果你还没有自己的服务器，左边点 `+` → `创建我的`
-   → 随便建一个（只给自己用就行）。
-2. 在你想接收岗位的那个**文字频道**上，鼠标悬停 → 点齿轮图标"编辑频道"
-   （或右键频道 → `编辑频道`）。
-3. 左侧选 `整合 / Integrations` → `Webhook` → `新 Webhook`。
-4. 它会自动建好一个。点 `复制 Webhook URL`。
-   —— 这串 URL 形如 `https://discord.com/api/webhooks/123.../abc...`，
-   先复制存好，这就是你唯一需要的密钥。
+1. Open Discord. If you do not have your own server, click `+` on the left and create a private server for yourself.
+2. Hover over the text channel where you want job alerts, then click the gear icon to edit the channel. You can also right-click the channel and choose `Edit Channel`.
+3. Go to `Integrations` -> `Webhooks` -> `New Webhook`.
+4. Click `Copy Webhook URL`.
 
-记下这一样东西：**DISCORD_WEBHOOK**。
+Save this value as `DISCORD_WEBHOOK`.
 
-⚠️ 这个 URL 谁拿到都能往你频道发消息，别公开贴出来。所以下面用 GitHub
-Secrets 存它，而不是写进代码。
+Warning: anyone who has this URL can post messages into your channel. Do not commit it into code or paste it publicly. Store it in GitHub Secrets instead.
 
 ---
 
-## 第 2 步：建 GitHub 仓库
+## Step 2: Create a GitHub Repository
 
-1. 登录 github.com，右上角 `+` → `New repository`。
-2. 名字随便（比如 `jobwatch`），选 **Private**（私有，别人看不到）。
-3. 勾选 "Add a README file"，点 `Create repository`。
+1. Log in to github.com.
+2. Click `+` in the top-right corner, then choose `New repository`.
+3. Choose a name, for example `jobwatch`.
+4. Select **Private**.
+5. Check `Add a README file`.
+6. Click `Create repository`.
 
 ---
 
-## 第 3 步：上传文件
+## Step 3: Upload the Files
 
-在仓库页面：
+In the repository page:
 
-1. 点 `Add file` → `Upload files`，把 `jobwatch.py` 和 `requirements.txt`
-   拖进去，`Commit changes`。
-2. 现在要放 workflow 文件，它必须在固定目录 `.github/workflows/` 下：
-   - 点 `Add file` → `Create new file`。
-   - 文件名一栏输入：`.github/workflows/jobwatch.yml`
-     （直接打这一串，GitHub 会自动帮你建好文件夹）
-   - 把 `jobwatch.yml` 的内容整段粘贴进去。
-   - `Commit changes`。
+1. Click `Add file` -> `Upload files`.
+2. Upload `jobwatch.py` and `requirements.txt`.
+3. Click `Commit changes`.
+4. Create the workflow file:
+   - Click `Add file` -> `Create new file`.
+   - In the filename field, enter `.github/workflows/jobwatch.yml`.
+   - Paste the content of `jobwatch.yml`.
+   - Click `Commit changes`.
 
-完成后你的仓库结构应该是：
-```
+Your repository should look like this:
+
+```text
 jobwatch.py
 requirements.txt
 .github/workflows/jobwatch.yml
@@ -87,82 +83,84 @@ requirements.txt
 
 ---
 
-## 第 4 步：填入密钥（Discord webhook URL）
+## Step 4: Add the Discord Webhook Secret
 
-不要把 webhook URL 直接写进代码。用 GitHub 的 Secrets：
+Do not put the webhook URL directly in the code.
 
-1. 仓库页 → `Settings` → 左侧 `Secrets and variables` → `Actions`。
-2. 点 `New repository secret`：
+1. Go to your repository.
+2. Open `Settings` -> `Secrets and variables` -> `Actions`.
+3. Click `New repository secret`.
+4. Set:
    - Name: `DISCORD_WEBHOOK`
-   - Secret: 你第 1 步复制的那串 webhook URL
-   - `Add secret`
+   - Secret: the Discord webhook URL from Step 1
+5. Click `Add secret`.
 
-就这一个，完成。
-
----
-
-## 第 5 步：先手动跑一次（重要！）
-
-第一次跑会把当前所有匹配岗位当成"新"推给你，可能几十条。先手动触发一次，
-把"基线"建立起来；之后每次就只推真正新增的。
-
-1. 仓库页 → 顶部 `Actions` 标签。
-2. 如果看到提示 "Workflows aren't being run on this repository"，
-   点绿色按钮 `I understand my workflows, go ahead and enable them`。
-3. 左侧点 `jobwatch` 这个 workflow → 右边 `Run workflow` → 再点 `Run workflow`。
-4. 等 1～2 分钟，刷新页面，点进那次运行看日志。
-   - 看到 `Fetched N jobs, M new` 就说明成功。
-   - 同时你的 Discord 频道应该收到一大批岗位（可能分成几条消息发，正常）。
-
-跑完后，仓库里会自动多出一个 `seen_jobs.db` 文件——这是"已推送记录"，
-脚本靠它去重。不要手动删它。
+That is the only secret required.
 
 ---
 
-## 第 6 步：确认自动运行
+## Step 5: Run the Workflow Once Manually
 
-做完上面，就已经在自动跑了。`jobwatch.yml` 里设的是每 30 分钟一次。
-你什么都不用做，电脑也可以关。
+The first run establishes the baseline. It may send a small batch of recent matching jobs. After that, the watcher uses `seen_jobs.db` to avoid sending duplicates.
 
-想验证：等半小时看 Actions 里有没有新的自动运行记录，
-或者随时回到 Actions 手动 `Run workflow` 测试。
+1. Open the `Actions` tab in your repository.
+2. If GitHub asks you to enable workflows, click `I understand my workflows, go ahead and enable them`.
+3. Select the `jobwatch` workflow on the left.
+4. Click `Run workflow`.
+5. Choose `alert`, then click `Run workflow` again.
+6. Wait 1-2 minutes, refresh the page, and open the run logs.
+
+If you see a line like `Fetched N jobs, M new`, the workflow is working. Your Discord channel should also receive the alert message.
+
+After the first successful run, the repository may contain a `seen_jobs.db` file. This file stores jobs that were already sent. Do not delete it unless you intentionally want to reset deduplication.
 
 ---
 
-## 备用方案：用 cron-job.org 触发 GitHub workflow
+## Step 6: Confirm Automatic Runs
 
-如果 GitHub 自带的 `schedule` 不稳定，可以让外部定时器每 30 分钟调用
-GitHub API。效果等同于自动帮你点 `Run workflow`，仍然是 GitHub Actions
-在跑 `jobwatch.py`。
+The workflow is configured to run every 30 minutes. Your computer does not need to stay on.
 
-### 1. 先创建 GitHub token
+To verify it, wait for the next scheduled run in the `Actions` tab. You can also trigger `Run workflow` manually at any time.
 
-1. GitHub 右上角头像 → `Settings`。
-2. 左侧 `Developer settings` → `Personal access tokens` → `Fine-grained tokens`。
-3. 点 `Generate new token`。
-4. Repository access 选 `Only select repositories`，只选你的 `jobWatcher` 仓库。
-5. Repository permissions 里把 `Actions` 设成 `Read and write`。
-6. 生成后复制 token。只复制这一次，别贴进代码、README、Discord 或公开地方。
+---
 
-### 2. 在 cron-job.org 新建定时任务
+## Backup Option: Trigger the Workflow with cron-job.org
 
-1. 打开 `https://cron-job.org`，注册并登录。
-2. 点 `Create cronjob`。
-3. Schedule 选每 30 分钟一次。
-4. URL 填：
+If GitHub's built-in `schedule` trigger is unreliable, use an external scheduler to call the GitHub API every 30 minutes. This is equivalent to clicking `Run workflow` automatically.
+
+### 1. Create a GitHub Fine-Grained Token
+
+1. Open GitHub.
+2. Click your avatar -> `Settings`.
+3. Go to `Developer settings` -> `Personal access tokens` -> `Fine-grained tokens`.
+4. Click `Generate new token`.
+5. Under repository access, choose `Only select repositories`.
+6. Select only your `jobWatcher` repository.
+7. Under repository permissions, set `Actions` to `Read and write`.
+8. Generate the token and copy it immediately.
+
+Do not paste the token into code, README files, Discord, or public places.
+
+### 2. Create the cron-job.org Job
+
+1. Open `https://cron-job.org`, create an account, and log in.
+2. Click `Create cronjob`.
+3. Enable the job.
+4. Set the schedule to every 30 minutes.
+5. Set the URL to:
 
 ```text
 https://api.github.com/repos/ivyyyyy2002-svg/jobWatcher/actions/workflows/jobwatch.yml/dispatches
 ```
 
-5. Request method 选 `POST`。
-6. Request body / Body 填：
+6. Set request method to `POST`.
+7. Set request body to:
 
 ```json
 {"ref":"main","inputs":{"mode":"alert"}}
 ```
 
-7. Headers 添加这几项：
+8. Add these headers:
 
 ```text
 Accept: application/vnd.github+json
@@ -171,58 +169,138 @@ X-GitHub-Api-Version: 2026-03-10
 Content-Type: application/json
 ```
 
-把 `YOUR_GITHUB_TOKEN` 换成你刚刚复制的 token。
+Replace `YOUR_GITHUB_TOKEN` with the token you created.
 
-### 3. 保存后测试
+### 3. Test It
 
-保存 cronjob 后点一次手动执行/测试。成功时 GitHub Actions 页面会出现一条新的
-`workflow_dispatch` 运行记录。以后 cron-job.org 每 30 分钟触发一次，即使
-GitHub 自带 `schedule` 没触发，也能继续自动检查岗位。
+After saving the cronjob, click the test run button. A successful test should show a 2xx response, and GitHub Actions should show a new `workflow_dispatch` run.
 
----
-
-## 常见调整
-
-**改"时间窗口"**（平时只推最近多少分钟内发布的）：打开 `jobwatch.py`，
-改 `ALERT_WINDOW_MINUTES`（默认 `60`，也就是 1 小时）。去重数据库会兜底防重复，所以即使之后
-你把窗口调大一点，也不会重复推送已经发过的岗位。
-（注意：此窗口只对有精确时间的来源生效；没有分钟级发布时间的岗位会被平时提醒跳过。）
-
-**改每日汇总时间**：打开 `.github/workflows/jobwatch.yml`，
-找 `- cron: "0 5 * * *"` 那行。`5` 是 UTC 小时，对应东部时间午夜到凌晨 1 点左右。
-想换成别的时间，改这个 UTC 小时即可。
-汇总回看多久也能改：`jobwatch.py` 里的 `DIGEST_LOOKBACK_HOURS`（默认 24）。
-
-**改提醒频率**：同一个 yml 文件，改第一条 `- cron: "*/30 * * * *"`。
-- `*/30 * * * *` = 每 30 分钟（默认）
-- `*/15 * * * *` = 每 15 分钟
-注意：数据源本身大多每小时才更新，跑太勤多半是空转，15～30 分钟最划算。
-另外 GitHub 免费版的定时任务在高峰期可能延迟几分钟，属正常。
-
-**手动测某个模式**：Actions 页 → `Run workflow`，会有个下拉框让你选
-`alert` 还是 `digest`，方便随时测试。
-
-**加要盯的公司**（想抢某家大厂，直连最快）：
-打开 `jobwatch.py`，把公司加到对应列表：
-- Greenhouse：`GREENHOUSE_COMPANIES`，填招聘页 URL 里的 slug
-  （`boards.greenhouse.io/公司名` 的"公司名"）
-- Lever：`LEVER_COMPANIES`，同理填 `jobs.lever.co/公司名` 的"公司名"
-- Workday：`WORKDAY_COMPANIES`，格式见文件里的注释
-
-**改关键词 / 地点**：脚本顶部 `Config` 区，
-`ROLE_RE`（职位类型）、`LOCATION_INCLUDE`（地点白名单，现在是加拿大）都能改。
-
-**临时不想收消息**：Actions 页面右上角可以 `Disable workflow`，想恢复再 `Enable`。
+After that, cron-job.org will trigger the alert workflow every 30 minutes even if GitHub's own schedule is delayed or skipped.
 
 ---
 
-## 出问题怎么排查
+## Common Adjustments
 
-- Discord 没收到消息：
-  - 确认 Secrets 里名字拼写完全是 `DISCORD_WEBHOOK`，值是完整的 webhook URL。
-  - 确认那个 webhook 对应的频道没被删、webhook 没被撤销。
-  - 去 Actions 看那次运行日志，搜 `[discord]` 看有没有报错。
-- 日志里某些来源报错（比如 linkedin 限流）：正常，不影响其它来源，
-  脚本不会崩，照样出结果。
-- 想看脚本到底抓了啥但不想发 Discord：本地把 `NOTIFY = "discord"`
-  改成 `NOTIFY = "print"`，命令行跑 `python3 jobwatch.py` 即可。
+**Change the regular alert window**
+
+Open `jobwatch.py` and change `ALERT_WINDOW_MINUTES`.
+
+The current default is:
+
+```python
+ALERT_WINDOW_MINUTES = 60
+```
+
+This means regular alerts check the last 1 hour. Deduplication still prevents jobs from being sent twice.
+
+**Change the daily digest time**
+
+Open `.github/workflows/jobwatch.yml` and find:
+
+```yaml
+- cron: "0 5 * * *"
+```
+
+GitHub cron times use UTC. `0 5 * * *` usually lands around midnight or 1 AM Eastern time, depending on daylight saving time.
+
+The digest lookback window is controlled in `jobwatch.py`:
+
+```python
+DIGEST_LOOKBACK_HOURS = 24
+```
+
+**Change the alert frequency**
+
+Open `.github/workflows/jobwatch.yml` and find the regular alert cron:
+
+```yaml
+- cron: "7,37 * * * *"
+```
+
+This runs at minute `07` and `37` of every hour, which is every 30 minutes.
+
+If you use cron-job.org, the equivalent custom crontab expression is:
+
+```text
+*/30 * * * *
+```
+
+Running more often than every 15-30 minutes is usually not useful because most job boards do not update that quickly.
+
+**Manually test a mode**
+
+Open the `Actions` tab, select `jobwatch`, click `Run workflow`, and choose:
+
+- `alert` for the regular alert
+- `digest` for the daily summary
+
+**Add companies**
+
+Open `jobwatch.py` and add companies to the matching list:
+
+- Greenhouse: add the board slug to `GREENHOUSE_COMPANIES`
+- Lever: add the company slug to `LEVER_COMPANIES`
+- Ashby: add the board slug to `ASHBY_COMPANIES`
+- Workday: add a tuple to `WORKDAY_COMPANIES`
+
+For Greenhouse, the slug is the last part of the board URL. For example:
+
+```text
+https://boards.greenhouse.io/stripe
+```
+
+The slug is `stripe`.
+
+**Change search keywords or location**
+
+Open the config area in `jobwatch.py`.
+
+- `LINKEDIN_QUERIES` and `INDEED_QUERIES` control broad search queries.
+- `ROLE_RE` controls the role keywords.
+- `LOCATION_INCLUDE` controls the Canada location whitelist.
+- The reject keyword lists control hard blockers such as seniority, citizenship, French requirements, unrelated majors, and long internship durations.
+
+The broad search queries are intentionally loose. The filter rules should be the strict part.
+
+**Pause alerts**
+
+Open the `Actions` tab and disable the workflow. You can enable it again later.
+
+---
+
+## Troubleshooting
+
+**Discord did not receive a message**
+
+- Confirm the GitHub secret is named exactly `DISCORD_WEBHOOK`.
+- Confirm the secret value is the full Discord webhook URL.
+- Confirm the Discord channel and webhook still exist.
+- Open the GitHub Actions run logs and search for `[discord]`.
+
+**Some sources fail in the logs**
+
+This can happen because job boards rate-limit, block scraping, or change their pages. The script should continue with the other sources.
+
+**The alert says 0 new postings for a long time**
+
+Check the GitHub Actions logs. The summary should show how many candidates were fetched, how many had usable times inside the window, how many were duplicates, and how many were filtered. If the candidate count is healthy but usable-time count is low, the issue is likely source timestamp precision rather than the watcher being broken.
+
+**You want to test locally without sending Discord messages**
+
+In `jobwatch.py`, temporarily change:
+
+```python
+NOTIFY = "discord"
+```
+
+to:
+
+```python
+NOTIFY = "print"
+```
+
+Then run:
+
+```bash
+python3 jobwatch.py
+```
