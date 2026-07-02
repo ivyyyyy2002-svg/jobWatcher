@@ -278,8 +278,9 @@ GENERIC_CAREER_SITES = [
 The generic adapter follows likely job-detail links and reads standard JSON-LD
 `JobPosting` data. Pages that require login, block automated requests, render all
 content only after JavaScript runs, or omit both job links and structured data
-need a site-specific adapter. Date-only postings remain available to the daily
-digest but are not treated as minute-precise regular alerts.
+need a site-specific adapter. Configured public career pages without timestamps
+send a one-time `newly discovered` alert when a matching URL is first seen.
+Date-only postings are not treated as minute-precise regular alerts.
 
 **Change search keywords or location**
 

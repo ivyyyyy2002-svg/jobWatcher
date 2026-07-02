@@ -130,7 +130,9 @@ COMMUNITY_MAX_AGE_DAYS = 14
 # --- Public company career pages ---
 # BambooHR entries use (company_name, company_subdomain).
 BAMBOOHR_COMPANIES = [
-    # ("Example Company", "example"),
+    ("Signal 1", "signal1"),
+    ("Ludia", "ludia"),
+    ("Carbon60", "carbon60"),
 ]
 
 # Generic entries use (company_name, public_careers_url).
@@ -602,12 +604,14 @@ def parse_jobposting_page(page_url, html, fallback_company):
                 " ", strip=True
             )
             job_url = urljoin(page_url, str(posting.get("url") or page_url))
+            posted_ts = parse_iso(posting.get("datePosted"))
             jobs.append({
                 "title": title,
                 "company": company,
                 "location": location,
                 "url": job_url,
-                "posted_ts": parse_iso(posting.get("datePosted")),
+                "posted_ts": posted_ts,
+                "first_seen_fallback": posted_ts is None,
                 "reject_reason": reject_reason(title, description, location),
                 "note": match_note(title, description),
             })
@@ -669,12 +673,70 @@ def fetch_public_career_site(company, page_url, bamboohr_only=False):
         unique[key] = job
     return list(unique.values())
 
+def bamboohr_location(opening):
+    location = opening.get("location") or opening.get("atsLocation") or {}
+    if not isinstance(location, dict):
+        return str(location)
+    parts = [
+        location.get("city"),
+        location.get("state") or location.get("province"),
+        location.get("addressCountry") or location.get("country"),
+    ]
+    return ", ".join(dict.fromkeys(str(part).strip() for part in parts if part))
+
 def fetch_bamboohr():
     out = []
     for company, subdomain in BAMBOOHR_COMPANIES:
-        url = f"https://{subdomain}.bamboohr.com/careers"
+        base_url = f"https://{subdomain}.bamboohr.com/careers"
         try:
-            out.extend(fetch_public_career_site(company, url, bamboohr_only=True))
+            response = requests.get(
+                f"{base_url}/list", headers=HEADERS, timeout=TIMEOUT
+            )
+            response.raise_for_status()
+            openings = response.json().get("result", [])
+            for summary in openings[:CAREER_DETAIL_PAGE_LIMIT]:
+                job_id = summary.get("id")
+                if not job_id:
+                    continue
+                opening = summary
+                try:
+                    detail = requests.get(
+                        f"{base_url}/{job_id}/detail",
+                        headers=HEADERS,
+                        timeout=TIMEOUT,
+                    )
+                    detail.raise_for_status()
+                    opening = (
+                        detail.json().get("result", {}).get("jobOpening")
+                        or summary
+                    )
+                except Exception as e:
+                    print(f"[bamboohr:{company}:{job_id}] {e}")
+
+                if opening.get("jobOpeningStatus", "Open") != "Open":
+                    continue
+                title = str(
+                    opening.get("jobOpeningName")
+                    or summary.get("jobOpeningName")
+                    or ""
+                ).strip()
+                description_html = str(opening.get("description") or "")
+                description = BeautifulSoup(
+                    description_html, "html.parser"
+                ).get_text(" ", strip=True)
+                location = bamboohr_location(opening) or bamboohr_location(summary)
+                job_url = opening.get("jobOpeningShareUrl") or f"{base_url}/{job_id}"
+                out.append({
+                    "title": title,
+                    "company": company,
+                    "location": location,
+                    "url": job_url,
+                    "posted_ts": None,
+                    "first_seen_fallback": True,
+                    "reject_reason": reject_reason(title, description, location),
+                    "note": match_note(title, description),
+                })
+                time.sleep(0.1)
         except Exception as e:
             print(f"[bamboohr:{company}] {e}")
     return out
@@ -1006,7 +1068,9 @@ def format_block(j):
         bits.append(company)
     if j.get("location"):
         bits.append(j["location"])
-    if ago:
+    if j.get("time_label"):
+        bits.append(j["time_label"])
+    elif ago:
         bits.append(ago)
     line2 = " · ".join(bits)
     lines = [line1]
@@ -1108,8 +1172,8 @@ def run_alert():
     """Incremental mode: notify ONLY about jobs whose posting time falls within
     the last ALERT_WINDOW_MINUTES. The dedup DB is a backstop against repeats.
 
-    Jobs without a minute-precise posting time are skipped in alert mode because
-    they cannot be safely proven to belong to the current window."""
+    Jobs without a minute-precise posting time are normally skipped. Configured
+    public career pages may instead alert once when a posting is first seen."""
     con = db_init()
     all_jobs = collect_all_jobs()
     now = time.time()
@@ -1147,7 +1211,22 @@ def run_alert():
             if reason not in ("role", "level"):
                 add_example(stats, reason, j)
             continue
+        uid = make_uid(j["company"], j["title"], j["url"])
         ts = j.get("posted_ts")
+        if not ts and j.get("first_seen_fallback"):
+            stats["in_window"] += 1
+            increment_source(j, "eligible")
+            increment_source(j, "first_seen")
+            if not is_new(con, uid):
+                stats["duplicate"] += 1
+                increment_source(j, "duplicate")
+                continue
+            j["posted_ts"] = int(now)
+            j["time_label"] = "newly discovered"
+            new_jobs.append(j)
+            increment_source(j, "new")
+            mark_seen(con, uid)
+            continue
         if not ts:
             stats["no_time"] += 1
             increment_source(j, "no_time")
@@ -1166,7 +1245,6 @@ def run_alert():
         stats["in_window"] += 1
         increment_source(j, "eligible")
         # Backstop: skip anything we've already notified about.
-        uid = make_uid(j["company"], j["title"], j["url"])
         if not is_new(con, uid):
             stats["duplicate"] += 1
             increment_source(j, "duplicate")
@@ -1183,6 +1261,7 @@ def run_alert():
             f"filtered {counters.get('filtered', 0)}, "
             f"no time {counters.get('no_time', 0)}, "
             f"date only {counters.get('date_only', 0)}, "
+            f"first seen {counters.get('first_seen', 0)}, "
             f"outside window {counters.get('outside_window', 0)}, "
             f"eligible {counters.get('eligible', 0)}, "
             f"duplicate {counters.get('duplicate', 0)}, "
