@@ -26,7 +26,7 @@ import smtplib
 from email.utils import parsedate_to_datetime
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import requests
@@ -126,6 +126,20 @@ COMMUNITY_REPOS = [
 # Only keep community postings newer than this many days (avoid back-flooding
 # with thousands of old entries on first run). Set to 0 for no age limit.
 COMMUNITY_MAX_AGE_DAYS = 14
+
+# --- Public company career pages ---
+# BambooHR entries use (company_name, company_subdomain).
+BAMBOOHR_COMPANIES = [
+    # ("Example Company", "example"),
+]
+
+# Generic entries use (company_name, public_careers_url).
+GENERIC_CAREER_SITES = [
+    # ("Example Company", "https://example.com/careers"),
+]
+
+# Limit detail-page requests from each configured careers page.
+CAREER_DETAIL_PAGE_LIMIT = 50
 
 # --- Greenhouse: board token (the slug in the careers-page URL) ---
 # e.g. https://boards.greenhouse.io/stripe -> "stripe"
@@ -495,6 +509,184 @@ def location_ok(loc):
 # ============================================================
 # 4. Fetchers - each returns [{title, company, location, url}]
 # ============================================================
+
+def iter_jobposting_schema(value):
+    """Yield JobPosting dictionaries from common JSON-LD containers."""
+    if isinstance(value, list):
+        for item in value:
+            yield from iter_jobposting_schema(item)
+        return
+    if not isinstance(value, dict):
+        return
+
+    schema_type = value.get("@type")
+    schema_types = schema_type if isinstance(schema_type, list) else [schema_type]
+    normalized_types = {
+        str(item).rstrip("/").rsplit("/", 1)[-1] for item in schema_types if item
+    }
+    if "JobPosting" in normalized_types:
+        yield value
+
+    for key in ("@graph", "mainEntity", "item", "itemListElement"):
+        if key in value:
+            yield from iter_jobposting_schema(value[key])
+
+def schema_value_name(value):
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return str(value.get("name") or "").strip()
+    return ""
+
+def schema_job_location(posting):
+    locations = posting.get("jobLocation") or []
+    if not isinstance(locations, list):
+        locations = [locations]
+
+    labels = []
+    for location in locations:
+        if isinstance(location, str):
+            labels.append(location.strip())
+            continue
+        if not isinstance(location, dict):
+            continue
+        address = location.get("address") or {}
+        if isinstance(address, str):
+            labels.append(address.strip())
+            continue
+        if not isinstance(address, dict):
+            continue
+        country = schema_value_name(address.get("addressCountry"))
+        if country.upper() == "CA":
+            country = "Canada"
+        parts = [
+            address.get("addressLocality"),
+            address.get("addressRegion"),
+            country,
+        ]
+        label = ", ".join(str(part).strip() for part in parts if part)
+        if label:
+            labels.append(label)
+
+    if labels:
+        return " / ".join(dict.fromkeys(labels))
+
+    requirements = posting.get("applicantLocationRequirements") or []
+    if not isinstance(requirements, list):
+        requirements = [requirements]
+    allowed = [schema_value_name(item) for item in requirements]
+    allowed = ["Canada" if name.upper() == "CA" else name for name in allowed]
+    allowed = [name for name in allowed if name]
+    if allowed and posting.get("jobLocationType") == "TELECOMMUTE":
+        return f"Remote - {', '.join(allowed)}"
+    return ""
+
+def parse_jobposting_page(page_url, html, fallback_company):
+    """Convert JSON-LD JobPosting objects on one public page to job records."""
+    soup = BeautifulSoup(html, "html.parser")
+    jobs = []
+    for script in soup.select('script[type="application/ld+json"]'):
+        try:
+            data = json.loads(script.string or script.get_text() or "")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        for posting in iter_jobposting_schema(data):
+            title = str(posting.get("title") or posting.get("name") or "").strip()
+            if not title:
+                continue
+            organization = posting.get("hiringOrganization") or {}
+            company = schema_value_name(organization) or fallback_company
+            location = schema_job_location(posting)
+            description_html = str(posting.get("description") or "")
+            description = BeautifulSoup(description_html, "html.parser").get_text(
+                " ", strip=True
+            )
+            job_url = urljoin(page_url, str(posting.get("url") or page_url))
+            jobs.append({
+                "title": title,
+                "company": company,
+                "location": location,
+                "url": job_url,
+                "posted_ts": parse_iso(posting.get("datePosted")),
+                "reject_reason": reject_reason(title, description, location),
+                "note": match_note(title, description),
+            })
+    return jobs
+
+def discover_job_detail_links(page_url, html, bamboohr_only=False):
+    """Find likely public job-detail links on a configured careers page."""
+    soup = BeautifulSoup(html, "html.parser")
+    links = []
+    seen = set()
+    for anchor in soup.select("a[href]"):
+        href = anchor.get("href", "").strip()
+        if not href or href.startswith(("mailto:", "tel:", "javascript:")):
+            continue
+        full_url = urljoin(page_url, href).split("#", 1)[0]
+        parsed = urlparse(full_url)
+        if parsed.scheme not in ("http", "https") or full_url == page_url:
+            continue
+        if bamboohr_only:
+            is_bamboohr_host = (
+                parsed.netloc == "bamboohr.com"
+                or parsed.netloc.endswith(".bamboohr.com")
+            )
+            is_job_link = (
+                is_bamboohr_host
+                and "/careers/" in parsed.path.rstrip("/")
+            )
+        else:
+            signal = f"{parsed.path} {anchor.get_text(' ', strip=True)}".lower()
+            is_job_link = bool(re.search(
+                r"\b(job|jobs|career|careers|opening|openings|position|positions|"
+                r"vacancy|vacancies|opportunity|opportunities)\b",
+                signal,
+            ))
+        if is_job_link and full_url not in seen:
+            seen.add(full_url)
+            links.append(full_url)
+    return links[:CAREER_DETAIL_PAGE_LIMIT]
+
+def fetch_public_career_site(company, page_url, bamboohr_only=False):
+    """Fetch one public careers page and parse linked JSON-LD job pages."""
+    response = requests.get(page_url, headers=HEADERS, timeout=TIMEOUT)
+    response.raise_for_status()
+    jobs = parse_jobposting_page(response.url, response.text, company)
+    detail_links = discover_job_detail_links(
+        response.url, response.text, bamboohr_only=bamboohr_only
+    )
+    for detail_url in detail_links:
+        try:
+            detail = requests.get(detail_url, headers=HEADERS, timeout=TIMEOUT)
+            detail.raise_for_status()
+            jobs.extend(parse_jobposting_page(detail.url, detail.text, company))
+        except Exception as e:
+            print(f"[career-page:{company}] {detail_url}: {e}")
+
+    unique = {}
+    for job in jobs:
+        key = (job.get("company"), job.get("title"), job.get("url"))
+        unique[key] = job
+    return list(unique.values())
+
+def fetch_bamboohr():
+    out = []
+    for company, subdomain in BAMBOOHR_COMPANIES:
+        url = f"https://{subdomain}.bamboohr.com/careers"
+        try:
+            out.extend(fetch_public_career_site(company, url, bamboohr_only=True))
+        except Exception as e:
+            print(f"[bamboohr:{company}] {e}")
+    return out
+
+def fetch_generic_careers():
+    out = []
+    for company, url in GENERIC_CAREER_SITES:
+        try:
+            out.extend(fetch_public_career_site(company, url))
+        except Exception as e:
+            print(f"[generic-careers:{company}] {e}")
+    return out
 
 def fetch_greenhouse():
     out = []
@@ -897,8 +1089,9 @@ def send(jobs, header=None):
 
 def collect_all_jobs():
     all_jobs = []
-    for fn in (fetch_greenhouse, fetch_lever, fetch_ashby, fetch_workday,
-               fetch_community, fetch_linkedin, fetch_indeed):
+    for fn in (fetch_bamboohr, fetch_generic_careers, fetch_greenhouse,
+               fetch_lever, fetch_ashby, fetch_workday, fetch_community,
+               fetch_linkedin, fetch_indeed):
         try:
             jobs = fn()
             source = fn.__name__.removeprefix("fetch_")

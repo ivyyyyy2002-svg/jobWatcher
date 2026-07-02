@@ -242,6 +242,8 @@ Open `jobwatch.py` and add companies to the matching list:
 - Lever: add the company slug to `LEVER_COMPANIES`
 - Ashby: add the board slug to `ASHBY_COMPANIES`
 - Workday: add a tuple to `WORKDAY_COMPANIES`
+- BambooHR: add `(company_name, company_subdomain)` to `BAMBOOHR_COMPANIES`
+- Other public career pages: add `(company_name, careers_url)` to `GENERIC_CAREER_SITES`
 
 For Greenhouse, the slug is the last part of the board URL. For example:
 
@@ -250,6 +252,34 @@ https://boards.greenhouse.io/stripe
 ```
 
 The slug is `stripe`.
+
+For a public BambooHR page such as:
+
+```text
+https://example.bamboohr.com/careers
+```
+
+add:
+
+```python
+BAMBOOHR_COMPANIES = [
+    ("Example Company", "example"),
+]
+```
+
+For a company-hosted careers page, add its public listing URL:
+
+```python
+GENERIC_CAREER_SITES = [
+    ("Example Company", "https://example.com/careers"),
+]
+```
+
+The generic adapter follows likely job-detail links and reads standard JSON-LD
+`JobPosting` data. Pages that require login, block automated requests, render all
+content only after JavaScript runs, or omit both job links and structured data
+need a site-specific adapter. Date-only postings remain available to the daily
+digest but are not treated as minute-precise regular alerts.
 
 **Change search keywords or location**
 
