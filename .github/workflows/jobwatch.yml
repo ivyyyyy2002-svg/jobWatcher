@@ -53,6 +53,17 @@ jobs:
             echo "mode=alert" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Checkout dedup state
+        if: steps.mode.outputs.mode == 'alert'
+        uses: actions/checkout@v4
+        with:
+          ref: jobwatch-state
+          path: .jobwatch-state
+
+      - name: Restore dedup database
+        if: steps.mode.outputs.mode == 'alert'
+        run: cp .jobwatch-state/seen_jobs.db seen_jobs.db
+
       - name: Run jobwatch (${{ steps.mode.outputs.mode }})
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
@@ -60,16 +71,18 @@ jobs:
           JOBWATCH_MODE: ${{ steps.mode.outputs.mode }}
         run: python jobwatch.py
 
-      # Only alert mode changes the dedup DB. Digest never writes it, so this is
-      # a no-op on digest runs.
+      # Keep runtime state on a separate branch so main contains only source changes.
       - name: Persist dedup database
+        if: steps.mode.outputs.mode == 'alert'
         run: |
-          if [[ -n "$(git status --porcelain seen_jobs.db)" ]]; then
+          if cmp -s seen_jobs.db .jobwatch-state/seen_jobs.db; then
+            echo "No DB changes to commit."
+          else
+            cp seen_jobs.db .jobwatch-state/seen_jobs.db
+            cd .jobwatch-state
             git config user.name "jobwatch-bot"
             git config user.email "jobwatch-bot@users.noreply.github.com"
             git add seen_jobs.db
             git commit -m "update seen jobs [skip ci]"
-            git push
-          else
-            echo "No DB changes to commit."
+            git push origin HEAD:jobwatch-state
           fi
