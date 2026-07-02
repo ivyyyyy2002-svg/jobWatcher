@@ -25,7 +25,7 @@ import sqlite3
 import smtplib
 from email.utils import parsedate_to_datetime
 from email.mime.text import MIMEText
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
@@ -584,17 +584,20 @@ def parse_workday_posted(text):
     if not text:
         return None
     t = text.lower()
-    now = time.time()
+    today = datetime.now(JOBWATCH_TIMEZONE).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
     if "today" in t:
-        return int(now)
+        return int(today.timestamp())
     if "yesterday" in t:
-        return int(now - 86400)
+        return int((today - timedelta(days=1)).timestamp())
     m = re.search(r"(\d+)\+?\s*day", t)
     if m:
-        return int(now - int(m.group(1)) * 86400)
+        return int((today - timedelta(days=int(m.group(1)))).timestamp())
     m = re.search(r"(\d+)\+?\s*month", t)
     if m:
-        return int(now - int(m.group(1)) * 30 * 86400)
+        days = int(m.group(1)) * 30
+        return int((today - timedelta(days=days)).timestamp())
     return None
 
 def fetch_workday():
@@ -621,8 +624,8 @@ def fetch_workday():
                         out.append({"title": title, "company": name,
                                     "location": loc, "url": full,
                                     "posted_ts": parse_workday_posted(j.get("postedOn")),
-                                    "reject_reason": reject_reason(title, search, loc),
-                                    "note": match_note(title, search)})
+                                    "reject_reason": reject_reason(title, "", loc),
+                                    "note": match_note(title, "")})
                     offset += 20
                     if offset >= data.get("total", 0) or offset > 100:
                         break
@@ -658,8 +661,8 @@ def fetch_linkedin():
                     "location": job_loc,
                     "url": a.get("href", "").split("?")[0],
                     "posted_ts": pts,
-                    "reject_reason": reject_reason(title, kw, job_loc),
-                    "note": match_note(title, kw),
+                    "reject_reason": reject_reason(title, "", job_loc),
+                    "note": match_note(title, ""),
                 })
         except Exception as e:
             print(f"[linkedin] {e}")
@@ -676,6 +679,9 @@ def fetch_indeed():
             r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
             if r.status_code != 200:
                 print(f"[indeed] status {r.status_code}")
+                if r.status_code == 403:
+                    print("[indeed] access denied; skipping remaining queries")
+                    break
                 continue
             soup = BeautifulSoup(r.text, "xml")
             for item in soup.select("item"):
@@ -687,15 +693,14 @@ def fetch_indeed():
                 title = parts[0] if parts else raw_title
                 company = parts[1] if len(parts) > 1 else "Indeed"
                 job_loc = parts[2] if len(parts) > 2 else loc
-                match_text = f"{kw} {desc}"
                 out.append({
                     "title": title,
                     "company": company,
                     "location": job_loc,
                     "url": link,
                     "posted_ts": parse_rss_date(pub),
-                    "reject_reason": reject_reason(title, match_text, job_loc),
-                    "note": match_note(title, match_text),
+                    "reject_reason": reject_reason(title, desc, job_loc),
+                    "note": match_note(title, desc),
                 })
         except Exception as e:
             print(f"[indeed] {e}")
@@ -756,8 +761,7 @@ def notify_telegram(text):
 
 def notify_discord(blocks, header):
     """Send to a Discord webhook. blocks = list of per-job text chunks.
-    Discord caps each message at 2000 chars, so we batch blocks under that.
-    Jobs are separated with a light divider for readability."""
+    Discord caps each message at 2000 chars, so we batch blocks under that."""
     if not DISCORD_WEBHOOK:
         print("[discord] DISCORD_WEBHOOK not set")
         return
@@ -768,7 +772,8 @@ def notify_discord(blocks, header):
         if not b:
             return
         try:
-            r = requests.post(DISCORD_WEBHOOK, json={"content": SEP.join(b)},
+            payload = {"content": SEP.join(b), "flags": 4}
+            r = requests.post(DISCORD_WEBHOOK, json=payload,
                               timeout=TIMEOUT)
             if r.status_code not in (200, 204):
                 print(f"[discord] status {r.status_code}: {r.text[:120]}")
@@ -799,10 +804,11 @@ def notify_email(text):
 
 def format_block(j):
     """One job -> a compact, readable block (Discord markdown)."""
-    stamp, ago = humanize_age(j.get("posted_ts"))
+    _, ago = humanize_age(j.get("posted_ts"))
     title = j.get("title", "")
     company = j.get("company", "")
-    line1 = f"**{title}**"
+    url = j.get("url", "")
+    line1 = f"**[{title}]({url})**" if url else f"**{title}**"
     bits = []
     if company:
         bits.append(company)
@@ -811,14 +817,9 @@ def format_block(j):
     if ago:
         bits.append(ago)
     line2 = " · ".join(bits)
-    line3 = j.get("url", "")
-    lines = ["---", line1]
+    lines = [line1]
     if line2:
         lines.append(line2)
-    if j.get("note"):
-        lines.append(f"Note: {j['note']}")
-    if line3:
-        lines.append(line3)
     return "\n".join(lines)
 
 def compact_job_label(j):
@@ -841,26 +842,12 @@ def add_example(stats, reason, job, limit=5):
 def alert_header(count, stats=None):
     """Build the alert-mode Discord header."""
     now = datetime.now(JOBWATCH_TIMEZONE).strftime("%b %d %H:%M")
-    noun = "posting" if count == 1 else "postings"
-    lines = [f"**Jobwatch: {count} new {noun}** · {now}"]
-    if stats:
-        summary = [
-            f"window {alert_window_label()}",
-            f"candidates {stats['fetched']}",
-            f"usable {stats['in_window']}",
-        ]
-        if stats.get("duplicate"):
-            summary.append(f"duplicate {stats['duplicate']}")
-        if stats.get("filtered"):
-            summary.append(f"filtered {stats['filtered']}")
-        lines.append(" · ".join(summary))
-        if count:
-            lines.append("")
+    if count == 0:
+        summary = "No new postings"
     else:
-        lines.append(f"window {alert_window_label()}")
-        if count:
-            lines.append("")
-    return "\n".join(lines)
+        noun = "posting" if count == 1 else "postings"
+        summary = f"{count} new {noun}"
+    return f"**Jobwatch · {summary} · {now}**"
 
 def digest_header(jobs):
     now = datetime.now(JOBWATCH_TIMEZONE)
@@ -876,28 +863,7 @@ def digest_blocks(jobs):
         jobs,
         key=lambda j: ((j.get("company") or "").lower(), -(j.get("posted_ts") or 0)),
     )
-    blocks = []
-    current_company = None
-    for j in jobs:
-        company = j.get("company") or "Unknown"
-        if company != current_company:
-            blocks.append(f"---\n**{company}**")
-            current_company = company
-        stamp, ago = humanize_age(j.get("posted_ts"))
-        details = []
-        if j.get("location"):
-            details.append(j["location"])
-        if ago:
-            details.append(ago)
-        lines = [f"**{j.get('title', '')}**"]
-        if details:
-            lines.append(" · ".join(details))
-        if j.get("note"):
-            lines.append(f"Note: {j['note']}")
-        if j.get("url"):
-            lines.append(j["url"])
-        blocks.append("\n".join(lines))
-    return blocks
+    return [format_block(j) for j in jobs]
 
 def send(jobs, header=None):
     if header is None:
@@ -934,7 +900,12 @@ def collect_all_jobs():
     for fn in (fetch_greenhouse, fetch_lever, fetch_ashby, fetch_workday,
                fetch_community, fetch_linkedin, fetch_indeed):
         try:
-            all_jobs.extend(fn())
+            jobs = fn()
+            source = fn.__name__.removeprefix("fetch_")
+            for job in jobs:
+                job.setdefault("source", source)
+            all_jobs.extend(jobs)
+            print(f"[source:{source}] fetched {len(jobs)} candidates")
         except Exception as e:
             print(f"[{fn.__name__}] {e}")
         time.sleep(1)  # be polite
@@ -957,6 +928,7 @@ def run_alert():
         return dt.hour == 0 and dt.minute == 0 and dt.second == 0
 
     new_jobs = []
+    source_stats = {}
     stats = {
         "fetched": len(all_jobs),
         "no_time": 0,
@@ -967,37 +939,62 @@ def run_alert():
         "filtered": 0,
         "examples": [],
     }
+
+    def increment_source(job, key):
+        source = job.get("source", "unknown")
+        counters = source_stats.setdefault(source, {})
+        counters[key] = counters.get(key, 0) + 1
+
     for j in all_jobs:
+        increment_source(j, "fetched")
         reason = j.get("reject_reason")
         if reason:
             stats["filtered"] += 1
+            increment_source(j, "filtered")
             if reason not in ("role", "level"):
                 add_example(stats, reason, j)
             continue
         ts = j.get("posted_ts")
         if not ts:
             stats["no_time"] += 1
+            increment_source(j, "no_time")
             add_example(stats, "missing exact time", j)
             continue
         if is_date_only(ts):
             stats["date_only"] += 1
+            increment_source(j, "date_only")
             add_example(stats, "date only", j)
             continue
         if ts < cutoff:
             stats["outside_window"] += 1
+            increment_source(j, "outside_window")
             add_example(stats, "outside window", j)
             continue
         stats["in_window"] += 1
+        increment_source(j, "eligible")
         # Backstop: skip anything we've already notified about.
         uid = make_uid(j["company"], j["title"], j["url"])
         if not is_new(con, uid):
             stats["duplicate"] += 1
+            increment_source(j, "duplicate")
             continue
         new_jobs.append(j)
+        increment_source(j, "new")
         mark_seen(con, uid)
 
     print(f"Fetched {len(all_jobs)} jobs, {stats['in_window']} eligible, "
           f"{stats['duplicate']} duplicates, {len(new_jobs)} new to notify")
+    for source, counters in source_stats.items():
+        print(
+            f"[source:{source}] fetched {counters.get('fetched', 0)}, "
+            f"filtered {counters.get('filtered', 0)}, "
+            f"no time {counters.get('no_time', 0)}, "
+            f"date only {counters.get('date_only', 0)}, "
+            f"outside window {counters.get('outside_window', 0)}, "
+            f"eligible {counters.get('eligible', 0)}, "
+            f"duplicate {counters.get('duplicate', 0)}, "
+            f"new {counters.get('new', 0)}"
+        )
     send(new_jobs, header=alert_header(len(new_jobs), stats=stats))
 
 def run_digest():
