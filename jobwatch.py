@@ -79,7 +79,7 @@ ALERT_WINDOW_MINUTES = 60
 # during the day, regardless of whether it was already alerted. It does NOT
 # touch the dedup DB, so it never interferes with alert mode.
 DIGEST_LOOKBACK_HOURS = 24
-DIGEST_TIMEZONE = "America/Toronto"
+JOBWATCH_TIMEZONE = ZoneInfo("America/Toronto")
 
 # --- Location filter ---
 # Two modes:
@@ -320,7 +320,10 @@ def parse_iso(s):
     try:
         from datetime import datetime as _dt
         s = s.replace("Z", "+00:00")
-        return int(_dt.fromisoformat(s).timestamp())
+        dt = _dt.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=JOBWATCH_TIMEZONE)
+        return int(dt.timestamp())
     except Exception:
         return None
 
@@ -338,7 +341,7 @@ def humanize_age(ts):
     if not ts:
         return ("", "")
     try:
-        dt = datetime.fromtimestamp(ts)
+        dt = datetime.fromtimestamp(ts, JOBWATCH_TIMEZONE)
         stamp = dt.strftime("%Y-%m-%d %H:%M")
         secs = max(0, int(time.time() - ts))
         if secs < 3600:
@@ -782,7 +785,7 @@ def notify_discord(blocks, header):
 
 def notify_email(text):
     msg = MIMEText(text, "plain", "utf-8")
-    msg["Subject"] = f"New job alert {datetime.now():%m-%d %H:%M}"
+    msg["Subject"] = f"New job alert {datetime.now(JOBWATCH_TIMEZONE):%m-%d %H:%M}"
     msg["From"] = EMAIL_FROM
     msg["To"] = EMAIL_TO
     try:
@@ -837,7 +840,7 @@ def add_example(stats, reason, job, limit=5):
 
 def alert_header(count, stats=None):
     """Build the alert-mode Discord header."""
-    now = datetime.now().strftime("%b %d %H:%M")
+    now = datetime.now(JOBWATCH_TIMEZONE).strftime("%b %d %H:%M")
     noun = "posting" if count == 1 else "postings"
     lines = [f"**Jobwatch: {count} new {noun}** · {now}"]
     if stats:
@@ -860,7 +863,7 @@ def alert_header(count, stats=None):
     return "\n".join(lines)
 
 def digest_header(jobs):
-    now = datetime.now(ZoneInfo(DIGEST_TIMEZONE))
+    now = datetime.now(JOBWATCH_TIMEZONE)
     count = len(jobs)
     noun = "posting" if count == 1 else "postings"
     return (
@@ -950,7 +953,7 @@ def run_alert():
 
     def is_date_only(ts):
         # midnight local time -> the source only gave us a date
-        dt = datetime.fromtimestamp(ts)
+        dt = datetime.fromtimestamp(ts, JOBWATCH_TIMEZONE)
         return dt.hour == 0 and dt.minute == 0 and dt.second == 0
 
     new_jobs = []
