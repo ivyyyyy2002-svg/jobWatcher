@@ -72,7 +72,7 @@ FILTER_MODE = "loose"
 # Each alert run only notifies about jobs whose minute-precise posting time
 # falls within this window. The dedup DB still prevents repeats if a job appears
 # in overlapping runs.
-ALERT_WINDOW_MINUTES = 60
+ALERT_WINDOW_MINUTES = 120
 
 # --- Daily digest ---
 # A separate "digest" run (meant for ~midnight) summarizes everything posted
@@ -285,6 +285,7 @@ INDEED_QUERIES = [
 
 # --- Notification method: pick one ---
 NOTIFY = "discord"   # "discord" | "telegram" | "email" | "print"
+NOTIFY_WHEN_NO_NEW_JOBS = False
 
 # Discord: paste your channel webhook URL (Server Settings -> Integrations ->
 # Webhooks -> New Webhook -> Copy Webhook URL). Stored as an env var/secret.
@@ -314,8 +315,22 @@ TIMEOUT = 20
 def db_init():
     con = sqlite3.connect(DB_PATH)
     con.execute("CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY, ts TEXT)")
+    con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
     con.commit()
     return con
+
+def get_meta(con, key, default=""):
+    cur = con.execute("SELECT value FROM meta WHERE key=?", (key,))
+    row = cur.fetchone()
+    return row[0] if row else default
+
+def set_meta(con, key, value):
+    con.execute(
+        "INSERT INTO meta(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, str(value)),
+    )
+    con.commit()
 
 def is_new(con, uid):
     cur = con.execute("SELECT 1 FROM seen WHERE id=?", (uid,))
@@ -630,6 +645,24 @@ def discover_job_detail_links(page_url, html, bamboohr_only=False):
         parsed = urlparse(full_url)
         if parsed.scheme not in ("http", "https") or full_url == page_url:
             continue
+        page_host = urlparse(page_url).netloc.lower()
+        target_host = parsed.netloc.lower()
+        trusted_ats_hosts = (
+            "greenhouse.io", "lever.co", "ashbyhq.com", "myworkdayjobs.com",
+            "smartrecruiters.com", "applytojob.com", "successfactors.com",
+            "taleo.net", "phenompeople.com", "icims.com",
+        )
+        same_site = (
+            target_host == page_host
+            or target_host.endswith("." + page_host)
+            or page_host.endswith("." + target_host)
+        )
+        trusted_ats = any(
+            target_host == host or target_host.endswith("." + host)
+            for host in trusted_ats_hosts
+        )
+        if not same_site and not trusted_ats:
+            continue
         if bamboohr_only:
             is_bamboohr_host = (
                 parsed.netloc == "bamboohr.com"
@@ -896,6 +929,9 @@ def fetch_linkedin():
             r = requests.get(base, params=params, headers=HEADERS, timeout=TIMEOUT)
             if r.status_code != 200:
                 print(f"[linkedin] status {r.status_code} (possibly rate-limited)")
+                if r.status_code == 429:
+                    print("[linkedin] rate limited; skipping remaining queries")
+                    break
                 continue
             soup = BeautifulSoup(r.text, "html.parser")
             for card in soup.select("li"):
@@ -1125,6 +1161,9 @@ def send(jobs, header=None):
     if header is None:
         header = alert_header(len(jobs))
     if not jobs:
+        if not NOTIFY_WHEN_NO_NEW_JOBS:
+            print("No new postings; notification skipped.")
+            return
         if NOTIFY == "discord":
             notify_discord([], header)
         elif NOTIFY == "telegram":
@@ -1190,12 +1229,15 @@ def run_alert():
         "fetched": len(all_jobs),
         "no_time": 0,
         "date_only": 0,
+        "date_only_baselined": 0,
+        "date_only_discovered": 0,
         "outside_window": 0,
         "in_window": 0,
         "duplicate": 0,
         "filtered": 0,
         "examples": [],
     }
+    date_only_baseline_ready = get_meta(con, "date_only_baseline_v1") == "ready"
 
     def increment_source(job, key):
         source = job.get("source", "unknown")
@@ -1235,7 +1277,27 @@ def run_alert():
         if is_date_only(ts):
             stats["date_only"] += 1
             increment_source(j, "date_only")
-            add_example(stats, "date only", j)
+            if not date_only_baseline_ready:
+                # Establish a quiet baseline once so enabling first-seen alerts
+                # does not flood Discord with every existing date-only posting.
+                if is_new(con, uid):
+                    mark_seen(con, uid)
+                stats["date_only_baselined"] += 1
+                increment_source(j, "date_only_baselined")
+                continue
+            if not is_new(con, uid):
+                stats["duplicate"] += 1
+                increment_source(j, "duplicate")
+                continue
+            stats["in_window"] += 1
+            stats["date_only_discovered"] += 1
+            increment_source(j, "eligible")
+            increment_source(j, "date_only_discovered")
+            j["posted_ts"] = int(now)
+            j["time_label"] = "newly discovered (source provides date only)"
+            new_jobs.append(j)
+            increment_source(j, "new")
+            mark_seen(con, uid)
             continue
         if ts < cutoff:
             stats["outside_window"] += 1
@@ -1253,6 +1315,14 @@ def run_alert():
         increment_source(j, "new")
         mark_seen(con, uid)
 
+    if not date_only_baseline_ready:
+        set_meta(con, "date_only_baseline_v1", "ready")
+        print(
+            f"Established date-only baseline with "
+            f"{stats['date_only_baselined']} matching postings; future newly "
+            "discovered date-only jobs will alert once."
+        )
+
     print(f"Fetched {len(all_jobs)} jobs, {stats['in_window']} eligible, "
           f"{stats['duplicate']} duplicates, {len(new_jobs)} new to notify")
     for source, counters in source_stats.items():
@@ -1261,6 +1331,8 @@ def run_alert():
             f"filtered {counters.get('filtered', 0)}, "
             f"no time {counters.get('no_time', 0)}, "
             f"date only {counters.get('date_only', 0)}, "
+            f"date-only baseline {counters.get('date_only_baselined', 0)}, "
+            f"date-only discovered {counters.get('date_only_discovered', 0)}, "
             f"first seen {counters.get('first_seen', 0)}, "
             f"outside window {counters.get('outside_window', 0)}, "
             f"eligible {counters.get('eligible', 0)}, "
