@@ -1,12 +1,10 @@
-name: jobwatch
+name: jobwatch-owner-and-jessie
 
 on:
   schedule:
-    # ALERT mode — every 30 min at :07 and :37. Pushes only fresh, not-yet-seen jobs.
-    # GitHub cron is UTC. Free-tier scheduled runs can be delayed a few minutes
-    # at peak times; offset minutes avoid the busiest :00/:30 scheduler windows.
+    # Regular alerts: both watchers run every 30 minutes.
     - cron: "7,37 * * * *"
-    # DIGEST mode — once daily around midnight / 1 AM Eastern.
+    # Daily digests: both watchers run around midnight / 1 AM Eastern.
     - cron: "0 5 * * *"
   workflow_dispatch:
     inputs:
@@ -19,16 +17,20 @@ on:
 permissions:
   contents: write
 
+# Keep state-branch pushes from overlapping with the next scheduled run.
 concurrency:
-  group: jobwatch
+  group: jobwatch-owner-and-jessie
   cancel-in-progress: false
 
 jobs:
-  watch:
+  owner-watch:
+    name: Owner jobwatch
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      - name: Checkout main
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -38,10 +40,6 @@ jobs:
       - name: Install dependencies
         run: pip install requests beautifulsoup4 lxml
 
-      # Decide the mode:
-      #  - the 05:00 UTC schedule -> digest
-      #  - everything else (30-min schedule) -> alert
-      #  - manual run -> whatever you picked in the dropdown
       - name: Determine mode
         id: mode
         run: |
@@ -53,36 +51,101 @@ jobs:
             echo "mode=alert" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Checkout dedup state
+      - name: Checkout owner dedup state
         if: steps.mode.outputs.mode == 'alert'
         uses: actions/checkout@v4
         with:
           ref: jobwatch-state
           path: .jobwatch-state
 
-      - name: Restore dedup database
+      - name: Restore owner dedup database
         if: steps.mode.outputs.mode == 'alert'
         run: cp .jobwatch-state/seen_jobs.db seen_jobs.db
 
-      - name: Run jobwatch (${{ steps.mode.outputs.mode }})
+      - name: Run owner jobwatch
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           JOBWATCH_DB: seen_jobs.db
           JOBWATCH_MODE: ${{ steps.mode.outputs.mode }}
         run: python jobwatch.py
 
-      # Keep runtime state on a separate branch so main contains only source changes.
-      - name: Persist dedup database
+      - name: Persist owner dedup database
         if: steps.mode.outputs.mode == 'alert'
         run: |
           if cmp -s seen_jobs.db .jobwatch-state/seen_jobs.db; then
-            echo "No DB changes to commit."
+            echo "No owner DB changes to commit."
           else
             cp seen_jobs.db .jobwatch-state/seen_jobs.db
             cd .jobwatch-state
             git config user.name "jobwatch-bot"
             git config user.email "jobwatch-bot@users.noreply.github.com"
             git add seen_jobs.db
-            git commit -m "update seen jobs [skip ci]"
+            git commit -m "update owner seen jobs [skip ci]"
             git push origin HEAD:jobwatch-state
+          fi
+
+  jessie-watch:
+    name: Jessie jobwatch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Jessie branch
+        uses: actions/checkout@v4
+        with:
+          ref: jessie-jobwatch
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml
+
+      - name: Determine mode
+        id: mode
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event.schedule }}" == "0 5 * * *" ]]; then
+            echo "mode=digest" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=alert" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout Jessie dedup state
+        if: steps.mode.outputs.mode == 'alert'
+        uses: actions/checkout@v4
+        with:
+          ref: jessie-jobwatch-state
+          path: .jobwatch-state
+
+      - name: Restore Jessie dedup database when available
+        if: steps.mode.outputs.mode == 'alert'
+        run: |
+          if [[ -f .jobwatch-state/jessie_seen_jobs.db ]]; then
+            cp .jobwatch-state/jessie_seen_jobs.db jessie_seen_jobs.db
+          else
+            echo "No Jessie DB yet; the first run will create it."
+          fi
+
+      - name: Run Jessie jobwatch
+        env:
+          JESSIE_DISCORD_WEBHOOK: ${{ secrets.JESSIE_DISCORD_WEBHOOK }}
+          JESSIE_JOBWATCH_DB: jessie_seen_jobs.db
+          JOBWATCH_MODE: ${{ steps.mode.outputs.mode }}
+        run: python jobwatch_jessie.py
+
+      - name: Persist Jessie dedup database
+        if: steps.mode.outputs.mode == 'alert'
+        run: |
+          if [[ -f .jobwatch-state/jessie_seen_jobs.db ]] && cmp -s jessie_seen_jobs.db .jobwatch-state/jessie_seen_jobs.db; then
+            echo "No Jessie DB changes to commit."
+          else
+            cp jessie_seen_jobs.db .jobwatch-state/jessie_seen_jobs.db
+            cd .jobwatch-state
+            git config user.name "jobwatch-bot"
+            git config user.email "jobwatch-bot@users.noreply.github.com"
+            git add jessie_seen_jobs.db
+            git commit -m "update Jessie seen jobs [skip ci]"
+            git push origin HEAD:jessie-jobwatch-state
           fi
