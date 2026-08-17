@@ -8,6 +8,7 @@ keeping Jessie's filters, searches, dedup database, and company list separate.
 import hashlib
 import os
 import re
+from datetime import datetime, timezone
 
 import jobwatch as watcher
 
@@ -59,24 +60,21 @@ watcher.KEEP_UNKNOWN_LOCATION = False
 # This edition combines official employer pages with LinkedIn and Indeed.
 watcher.COMMUNITY_REPOS = []
 watcher.BAMBOOHR_COMPANIES = []
-watcher.GREENHOUSE_COMPANIES = ["benchsci", "deepgenomics"]
+watcher.GREENHOUSE_COMPANIES = []
 watcher.LEVER_COMPANIES = ["deepgenomics"]
-watcher.ASHBY_COMPANIES = ["benchsci"]
+watcher.ASHBY_COMPANIES = []
 watcher.WORKDAY_COMPANIES = []
+watcher.CAREER_DETAIL_PAGE_LIMIT = 15
 watcher.GENERIC_CAREER_SITES = [
     ("Pfizer Canada", "https://www.pfizer.com/about/careers"),
     ("Sanofi Canada", "https://jobs.sanofi.com/en/location/toronto-ontario-canada-jobs/507-18104/6251999-6093943-6167865/4"),
     ("Johnson & Johnson", "https://www.careers.jnj.com/en/jobs/"),
     ("Novartis Canada", "https://www.novartis.com/ca-en/careers"),
-    ("Merck Canada", "https://jobs.merck.com/us/en/canada"),
+    ("Merck Canada", "https://jobs.merck.com/us/en/"),
     ("Apotex", "https://www.apotex.com/global/about-us/careers"),
-    ("Pharmascience", "https://www.pharmascience.com/careers/"),
-    ("Bausch Health", "https://jobs.bauschhealth.com/"),
     ("SickKids", "https://www.sickkids.ca/en/careers-volunteer/careers/"),
     ("University Health Network", "https://www.uhn.ca/corporate/careers"),
-    ("Sunnybrook", "https://sunnybrook.ca/content/?page=careers"),
     ("Women's College Hospital", "https://www.womenscollegehospital.ca/careers/"),
-    ("Unity Health Toronto", "https://unityhealth.to/careers/"),
     ("Sinai Health", "https://www.sinaihealth.ca/careers-at-sinai-health/research-jobs"),
     ("CAMH", "https://www.camh.ca/en/driving-change/about-camh/careers"),
     ("Ontario Institute for Cancer Research", "https://oicr.on.ca/careers/"),
@@ -84,12 +82,9 @@ watcher.GENERIC_CAREER_SITES = [
     ("Roche Canada", "https://careers.roche.com/global/en/canada"),
     ("AstraZeneca Canada", "https://careers.astrazeneca.com/canada"),
     ("GSK Canada", "https://www.gsk.com/en-gb/careers/"),
-    ("Bayer Canada", "https://career.bayer.com/"),
     ("Thermo Fisher Scientific", "https://jobs.thermofisher.com/global/en"),
     ("Eurofins Canada", "https://careers.eurofins.com/"),
     ("SGS Canada", "https://www.sgs.com/en-ca/our-company/careers-at-sgs"),
-    ("LifeLabs", "https://jobs.lifelabs.com/"),
-    ("Dynacare", "https://jobs.dynacare.ca/"),
     ("Deep Genomics", "https://www.deepgenomics.com/careers/"),
     ("BenchSci", "https://www.benchsci.com/careers"),
 ]
@@ -110,11 +105,6 @@ SEARCH_TERMS = [
     "formulation scientist", "upstream downstream technologist",
     "sample management", "specimen processing",
 ]
-watcher.LINKEDIN_QUERIES = [
-    (term, SEARCH_LOCATION) for term in SEARCH_TERMS
-]
-watcher.INDEED_QUERIES = list(watcher.LINKEDIN_QUERIES)
-
 # Kept as explicit configuration/documentation and used for company-name
 # canonicalization during cross-site deduplication.
 PREFERRED_COMPANIES = [
@@ -143,11 +133,28 @@ COMPANY_SEARCH_GROUPS = [
     'Roche OR AstraZeneca OR GSK OR Bayer OR "Thermo Fisher"',
     'LifeLabs OR Dynacare OR Eurofins OR SGS',
 ]
-watcher.LINKEDIN_QUERIES.extend(
+ALL_SEARCH_QUERIES = [
+    (term, SEARCH_LOCATION) for term in SEARCH_TERMS
+] + [
     (f"({companies}) (research OR clinical OR laboratory OR quality)", SEARCH_LOCATION)
     for companies in COMPANY_SEARCH_GROUPS
-)
+]
+
+# GitHub-hosted IPs are quickly rate-limited when dozens of searches run at
+# once. Rotate five queries per half-hour; the complete set is covered over
+# several runs without hammering LinkedIn/Indeed on every invocation.
+QUERY_BATCH_SIZE = 5
+half_hour_slot = int(datetime.now(timezone.utc).timestamp() // 1800)
+batch_start = (half_hour_slot * QUERY_BATCH_SIZE) % len(ALL_SEARCH_QUERIES)
+watcher.LINKEDIN_QUERIES = [
+    ALL_SEARCH_QUERIES[(batch_start + offset) % len(ALL_SEARCH_QUERIES)]
+    for offset in range(QUERY_BATCH_SIZE)
+]
 watcher.INDEED_QUERIES = list(watcher.LINKEDIN_QUERIES)
+print(
+    f"[search-rotation] running {QUERY_BATCH_SIZE}/{len(ALL_SEARCH_QUERIES)} "
+    f"queries this half-hour (batch starts at {batch_start})"
+)
 
 FRENCH_OR_BILINGUAL_RE = re.compile(r"\b(french|bilingual|fran[cç]ais)\b", re.I)
 LIFTING_RE = re.compile(
