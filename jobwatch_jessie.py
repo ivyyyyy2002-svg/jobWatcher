@@ -12,13 +12,23 @@ import re
 import jobwatch as watcher
 
 
-# Target roles. Common spelling variants are included deliberately.
+# Broad life-sciences role taxonomy. Matching is title-first below so words such
+# as "medical" in an unrelated employer description do not create noisy hits.
 watcher.ROLE_RE = re.compile(
-    r"\b(bio[\s-]*tech(?:nology)?|life\s*sciences?|research\s+assistant|"
-    r"medical(?:\s+data\s+analyst)?|pharm(?:a|aceutical|aceuticals)?(?:\s+research)?|"
-    r"bio[\s-]*informatics?|clinical|biomedical(?:\s+engineering?)?|"
-    r"quality\s+assurance|qa|technologist|molecular|nano[\s-]*technologist|"
-    r"biochemical(?:\s+engineering?)?)\b",
+    r"\b(bio[\s-]*tech(?:nology)?|life[\s-]*sciences?|research(?:\s+assistant|"
+    r"\s+associate|\s+coordinator|\s+technician)?|laboratory|lab\s+(?:assistant|"
+    r"technician|technologist|analyst)|medical(?:\s+data|\s+device|\s+laboratory)?|"
+    r"pharm(?:a|aceutical|aceuticals)?|clinical(?:\s+research|\s+trial|\s+data|"
+    r"\s+operations)?|bio[\s-]*informatics?|biostatistics?|health\s+data|"
+    r"computational\s+biology|genomics?|proteomics?|biomedical|biochemical|"
+    r"bio[\s-]*process|bio[\s-]*manufacturing|quality\s+(?:assurance|control|"
+    r"systems?)|\bqa\b|\bqc\b|compliance|validation|regulatory\s+affairs?|"
+    r"document\s+control|pharmaco[\s-]*vigilance|drug\s+safety|medical\s+affairs|"
+    r"technologist|molecular|nano[\s-]*(?:technology|technologist)|microbiology|"
+    r"immunology|cell\s+(?:biology|culture|therapy)|tissue\s+culture|assay|"
+    r"analytical\s+(?:chemistry|development)|formulation|upstream|downstream|"
+    r"purification|fermentation|aseptic|sterility|gmp|glp|gcp|cmc|vaccine|"
+    r"diagnostics?|specimen|sample\s+management|clinical\s+study)\b",
     re.I,
 )
 
@@ -45,22 +55,60 @@ watcher.LOCATION_INCLUDE = [
 watcher.LOCATION_EXCLUDE = []
 watcher.KEEP_UNKNOWN_LOCATION = False
 
-# The existing community feeds focus on software internships, so they add noise
-# for this search. LinkedIn and Indeed searches below cover the requested roles.
+# The existing community feeds focus on software internships, so they add noise.
+# This edition combines official employer pages with LinkedIn and Indeed.
 watcher.COMMUNITY_REPOS = []
 watcher.BAMBOOHR_COMPANIES = []
-watcher.GREENHOUSE_COMPANIES = []
-watcher.LEVER_COMPANIES = []
-watcher.ASHBY_COMPANIES = []
+watcher.GREENHOUSE_COMPANIES = ["benchsci", "deepgenomics"]
+watcher.LEVER_COMPANIES = ["deepgenomics"]
+watcher.ASHBY_COMPANIES = ["benchsci"]
 watcher.WORKDAY_COMPANIES = []
-watcher.GENERIC_CAREER_SITES = []
+watcher.GENERIC_CAREER_SITES = [
+    ("Pfizer Canada", "https://www.pfizer.com/about/careers"),
+    ("Sanofi Canada", "https://jobs.sanofi.com/en/location/toronto-ontario-canada-jobs/507-18104/6251999-6093943-6167865/4"),
+    ("Johnson & Johnson", "https://www.careers.jnj.com/en/jobs/"),
+    ("Novartis Canada", "https://www.novartis.com/ca-en/careers"),
+    ("Merck Canada", "https://jobs.merck.com/us/en/canada"),
+    ("Apotex", "https://www.apotex.com/global/about-us/careers"),
+    ("Pharmascience", "https://www.pharmascience.com/careers/"),
+    ("Bausch Health", "https://jobs.bauschhealth.com/"),
+    ("SickKids", "https://www.sickkids.ca/en/careers-volunteer/careers/"),
+    ("University Health Network", "https://www.uhn.ca/corporate/careers"),
+    ("Sunnybrook", "https://sunnybrook.ca/content/?page=careers"),
+    ("Women's College Hospital", "https://www.womenscollegehospital.ca/careers/"),
+    ("Unity Health Toronto", "https://unityhealth.to/careers/"),
+    ("Sinai Health", "https://www.sinaihealth.ca/careers-at-sinai-health/research-jobs"),
+    ("CAMH", "https://www.camh.ca/en/driving-change/about-camh/careers"),
+    ("Ontario Institute for Cancer Research", "https://oicr.on.ca/careers/"),
+    ("University of Toronto", "https://jobs.utoronto.ca/"),
+    ("Roche Canada", "https://careers.roche.com/global/en/canada"),
+    ("AstraZeneca Canada", "https://careers.astrazeneca.com/canada"),
+    ("GSK Canada", "https://www.gsk.com/en-gb/careers/"),
+    ("Bayer Canada", "https://career.bayer.com/"),
+    ("Thermo Fisher Scientific", "https://jobs.thermofisher.com/global/en"),
+    ("Eurofins Canada", "https://careers.eurofins.com/"),
+    ("SGS Canada", "https://www.sgs.com/en-ca/our-company/careers-at-sgs"),
+    ("LifeLabs", "https://jobs.lifelabs.com/"),
+    ("Dynacare", "https://jobs.dynacare.ca/"),
+    ("Deep Genomics", "https://www.deepgenomics.com/careers/"),
+    ("BenchSci", "https://www.benchsci.com/careers"),
+]
 
 SEARCH_LOCATION = "Greater Toronto Area, Canada"
 SEARCH_TERMS = [
-    "biotech", "research assistant", "medical", "pharmaceutical research",
-    "medical data analyst", "bioinformatics", "clinical",
-    "biomedical engineering", "quality assurance", "technologist",
-    "molecular", "nano technologist", "biochemical engineering",
+    "biotech associate", "life science assistant", "research assistant",
+    "research coordinator", "research technician", "laboratory technician",
+    "lab technologist", "medical laboratory", "pharmaceutical research",
+    "clinical research coordinator", "clinical trial assistant",
+    "clinical data coordinator", "medical data analyst", "bioinformatics",
+    "biostatistics", "computational biology", "genomics analyst",
+    "biomedical engineering", "medical device", "bioprocess technician",
+    "biomanufacturing", "quality assurance pharma", "quality control lab",
+    "GMP compliance", "validation specialist", "regulatory affairs associate",
+    "pharmacovigilance", "drug safety associate", "molecular biology",
+    "microbiology technician", "cell culture", "analytical chemistry",
+    "formulation scientist", "upstream downstream technologist",
+    "sample management", "specimen processing",
 ]
 watcher.LINKEDIN_QUERIES = [
     (term, SEARCH_LOCATION) for term in SEARCH_TERMS
@@ -76,8 +124,30 @@ PREFERRED_COMPANIES = [
     "SickKids Research Institute", "UHN", "Krembil Research Institute",
     "Allan Slaight Medical Innovation Labs", "Sunnybrook Research Institute",
     "Women's College Hospital Research Institute", "Unity Health Research",
-    "Sinai Health",
+    "Sinai Health", "CAMH", "Ontario Institute for Cancer Research",
+    "University of Toronto", "Roche Canada", "AstraZeneca Canada",
+    "GSK Canada", "Bayer Canada", "Thermo Fisher Scientific",
+    "Eurofins Canada", "SGS Canada", "LifeLabs", "Dynacare",
+    "Deep Genomics", "BenchSci", "BlueRock Therapeutics",
+    "POINT Biopharma", "Fusion Pharmaceuticals", "Kite Pharma",
 ]
+
+# Targeted employer searches complement official pages that render their job
+# boards entirely in JavaScript and therefore expose little HTML to a scraper.
+COMPANY_SEARCH_GROUPS = [
+    "Pfizer OR Sanofi OR Novartis OR Merck OR Apotex",
+    '"Johnson & Johnson" OR Janssen OR Pharmascience OR Bausch',
+    "SickKids OR UHN OR Krembil OR Sunnybrook",
+    '"Women\'s College Hospital" OR "Unity Health" OR "Sinai Health" OR CAMH',
+    '"Deep Genomics" OR BenchSci OR OICR OR "BlueRock Therapeutics"',
+    'Roche OR AstraZeneca OR GSK OR Bayer OR "Thermo Fisher"',
+    'LifeLabs OR Dynacare OR Eurofins OR SGS',
+]
+watcher.LINKEDIN_QUERIES.extend(
+    (f"({companies}) (research OR clinical OR laboratory OR quality)", SEARCH_LOCATION)
+    for companies in COMPANY_SEARCH_GROUPS
+)
+watcher.INDEED_QUERIES = list(watcher.LINKEDIN_QUERIES)
 
 FRENCH_OR_BILINGUAL_RE = re.compile(r"\b(french|bilingual|fran[cç]ais)\b", re.I)
 LIFTING_RE = re.compile(
@@ -104,17 +174,50 @@ PHD_ONLY_RE = re.compile(
     r"(?:ph\.?\s*d\.?|doctorate)\b",
     re.I,
 )
+ENTRY_TITLE_RE = re.compile(
+    r"\b(assistant|associate|coordinator|technician|technologist|analyst|"
+    r"specialist|scientist\s*(?:i|1)?|engineer\s*(?:i|1)?|operator|officer|"
+    r"new\s*grad(?:uate)?|junior|entry[\s-]*level)\b",
+    re.I,
+)
+SCIENCE_CONTEXT_RE = re.compile(
+    r"\b(research|laboratory|clinical|patient|healthcare|hospital|pharma|"
+    r"biotech|biology|chemistry|medical|diagnostic|specimen|sample|gmp|gcp|glp)\b",
+    re.I,
+)
+UNWANTED_TYPE_RE = re.compile(
+    r"\b(part[\s-]*time|casual|on[\s-]*call|volunteer|unpaid|post[\s-]*doc|"
+    r"postdoctoral|fellowship|faculty|professor|internship|intern|co[\s-]*op|"
+    r"summer\s+student)\b",
+    re.I,
+)
+UNRELATED_TITLE_RE = re.compile(
+    r"\b(nurse|nursing|physician|surgeon|dentist|veterinarian|social\s+worker|"
+    r"sales|account\s+manager|marketing|business\s+development|receptionist|"
+    r"administrative\s+assistant|personal\s+support\s+worker|pharmacist)\b",
+    re.I,
+)
 
 
 def match_reject_reason(title, description=""):
-    """Apply Jessie's role, job-type, seniority, and hard exclusions."""
-    blob = f"{title or ''} {description or ''}"
-    if not watcher.ROLE_RE.search(blob):
+    """Apply broad title-first life-science matching and hard exclusions."""
+    title = title or ""
+    description = description or ""
+    blob = f"{title} {description}"
+    title_matches = watcher.ROLE_RE.search(title)
+    generic_science_role = (
+        ENTRY_TITLE_RE.search(title)
+        and watcher.ROLE_RE.search(description)
+        and SCIENCE_CONTEXT_RE.search(description)
+    )
+    if not title_matches and not generic_science_role:
         return "role"
-    if not watcher.EARLY_RE.search(blob):
-        return "job type"
-    if watcher.SENIORITY_EXCLUDE_RE.search(title or ""):
+    if UNRELATED_TITLE_RE.search(title):
+        return "unrelated occupation"
+    if watcher.SENIORITY_EXCLUDE_RE.search(title):
         return "seniority"
+    if UNWANTED_TYPE_RE.search(blob):
+        return "job type"
     exclusions = (
         (FRENCH_OR_BILINGUAL_RE, "French/bilingual"),
         (LIFTING_RE, "lifting requirement"),
@@ -130,6 +233,9 @@ def match_reject_reason(title, description=""):
 
 
 def match_note(title, description=""):
+    blob = f"{title or ''} {description or ''}"
+    if not watcher.EARLY_RE.search(blob):
+        return "employment type/experience level not explicit; please verify"
     return ""
 
 
@@ -164,6 +270,9 @@ def make_uid(company, title, url=""):
 watcher.match_reject_reason = match_reject_reason
 watcher.match_note = match_note
 watcher.make_uid = make_uid
+# Never fall back to the owner's Discord channel. Jessie must have her own
+# repository secret named JESSIE_DISCORD_WEBHOOK.
+watcher.DISCORD_WEBHOOK = os.environ.get("JESSIE_DISCORD_WEBHOOK", "")
 watcher.DB_PATH = os.environ.get(
     "JESSIE_JOBWATCH_DB",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "jessie_seen_jobs.db"),

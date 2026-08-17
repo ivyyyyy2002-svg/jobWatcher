@@ -1,4 +1,4 @@
-name: jobwatch
+name: jobwatch-jessie
 
 on:
   schedule:
@@ -20,7 +20,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: jobwatch
+  group: jobwatch-jessie
   cancel-in-progress: false
 
 jobs:
@@ -57,7 +57,7 @@ jobs:
         if: steps.mode.outputs.mode == 'alert'
         uses: actions/checkout@v4
         with:
-          ref: jobwatch-state
+          ref: jessie-jobwatch-state
           path: .jobwatch-state
 
       - name: Restore dedup database
@@ -66,10 +66,10 @@ jobs:
 
       - name: Run jobwatch (${{ steps.mode.outputs.mode }})
         env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          JOBWATCH_DB: seen_jobs.db
+          JESSIE_DISCORD_WEBHOOK: ${{ secrets.JESSIE_DISCORD_WEBHOOK }}
+          JESSIE_JOBWATCH_DB: seen_jobs.db
           JOBWATCH_MODE: ${{ steps.mode.outputs.mode }}
-        run: python jobwatch.py
+        run: python jobwatch_jessie.py
 
       # Keep runtime state on a separate branch so main contains only source changes.
       - name: Persist dedup database
@@ -84,5 +84,5 @@ jobs:
             git config user.email "jobwatch-bot@users.noreply.github.com"
             git add seen_jobs.db
             git commit -m "update seen jobs [skip ci]"
-            git push origin HEAD:jobwatch-state
+            git push origin HEAD:jessie-jobwatch-state
           fi

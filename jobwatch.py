@@ -286,6 +286,10 @@ INDEED_QUERIES = [
 # --- Notification method: pick one ---
 NOTIFY = "discord"   # "discord" | "telegram" | "email" | "print"
 
+# Regular 30-minute checks stay silent when there are no new matching jobs.
+# Set to True only if you want a heartbeat/status message after every check.
+NOTIFY_WHEN_NO_NEW_JOBS = False
+
 # Discord: paste your channel webhook URL (Server Settings -> Integrations ->
 # Webhooks -> New Webhook -> Copy Webhook URL). Stored as an env var/secret.
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "")
@@ -1125,6 +1129,9 @@ def send(jobs, header=None):
     if header is None:
         header = alert_header(len(jobs))
     if not jobs:
+        if not NOTIFY_WHEN_NO_NEW_JOBS:
+            print("No new postings; notification skipped.")
+            return
         if NOTIFY == "discord":
             notify_discord([], header)
         elif NOTIFY == "telegram":
