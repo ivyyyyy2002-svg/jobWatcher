@@ -55,6 +55,9 @@ watcher.LOCATION_INCLUDE = [
 ]
 watcher.LOCATION_EXCLUDE = []
 watcher.KEEP_UNKNOWN_LOCATION = False
+# Preserve Jessie's five-location policy when using the shared detail checker.
+watcher.REMOTE_CANADA_RE = re.compile(r"(?!)")
+watcher.LONDON_ON_RE = re.compile(r"(?!)")
 
 # The existing community feeds focus on software internships, so they add noise.
 # This edition combines official employer pages with LinkedIn and Indeed.
@@ -277,6 +280,10 @@ def make_uid(company, title, url=""):
 watcher.match_reject_reason = match_reject_reason
 watcher.match_note = match_note
 watcher.make_uid = make_uid
+# Ivy's committed skill profile belongs only to the owner watcher. Jessie gets
+# the shared full-JD, freshness, repost, applicant and salary validation, but no
+# resume score unless a separate Jessie profile is explicitly added later.
+watcher.load_resume_skills = lambda: set()
 # Never fall back to the owner's Discord channel. Jessie must have her own
 # repository secret named JESSIE_DISCORD_WEBHOOK.
 watcher.DISCORD_WEBHOOK = os.environ.get("JESSIE_DISCORD_WEBHOOK", "")

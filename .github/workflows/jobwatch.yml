@@ -11,7 +11,7 @@ on:
       mode:
         description: "Run mode"
         type: choice
-        options: [alert, digest]
+        options: [alert, digest, test]
         default: alert
 
 permissions:
@@ -38,7 +38,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 lxml
+        run: pip install -r requirements.txt
 
       - name: Determine mode
         id: mode
@@ -63,11 +63,34 @@ jobs:
         run: cp .jobwatch-state/seen_jobs.db seen_jobs.db
 
       - name: Run owner jobwatch
+        if: steps.mode.outputs.mode != 'test'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          JOBWATCH_RESUME_SKILLS: ${{ secrets.JOBWATCH_RESUME_SKILLS }}
           JOBWATCH_DB: seen_jobs.db
           JOBWATCH_MODE: ${{ steps.mode.outputs.mode }}
         run: python jobwatch.py
+
+      - name: Test owner Discord connection
+        if: steps.mode.outputs.mode == 'test'
+        env:
+          TEST_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+
+          webhook = os.environ.get("TEST_WEBHOOK", "")
+          if not webhook:
+              raise SystemExit("DISCORD_WEBHOOK is not configured")
+          response = requests.post(
+              webhook,
+              json={"content": "✅ Owner Jobwatch Discord connection successful!"},
+              timeout=20,
+          )
+          response.raise_for_status()
+          print("Owner Discord test message sent.")
+          PY
 
       - name: Persist owner dedup database
         if: steps.mode.outputs.mode == 'alert'
@@ -129,11 +152,33 @@ jobs:
           fi
 
       - name: Run Jessie jobwatch
+        if: steps.mode.outputs.mode != 'test'
         env:
           JESSIE_DISCORD_WEBHOOK: ${{ secrets.JESSIE_DISCORD_WEBHOOK }}
           JESSIE_JOBWATCH_DB: jessie_seen_jobs.db
           JOBWATCH_MODE: ${{ steps.mode.outputs.mode }}
         run: python jobwatch_jessie.py
+
+      - name: Test Jessie Discord connection
+        if: steps.mode.outputs.mode == 'test'
+        env:
+          TEST_WEBHOOK: ${{ secrets.JESSIE_DISCORD_WEBHOOK }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+
+          webhook = os.environ.get("TEST_WEBHOOK", "")
+          if not webhook:
+              raise SystemExit("JESSIE_DISCORD_WEBHOOK is not configured")
+          response = requests.post(
+              webhook,
+              json={"content": "✅ Jessie Jobwatch Discord connection successful!"},
+              timeout=20,
+          )
+          response.raise_for_status()
+          print("Jessie Discord test message sent.")
+          PY
 
       - name: Persist Jessie dedup database
         if: steps.mode.outputs.mode == 'alert'
