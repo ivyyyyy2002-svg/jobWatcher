@@ -72,8 +72,7 @@ DETAIL_PAGE_DELAY_SECONDS = 0.15
 # high applicant counts are treated as stale/low-value recruiting inventory.
 LINKEDIN_MAX_APPLICANTS = 999
 
-# Target annual base-pay band in CAD. A range is rejected when its entire
-# stated band sits below/above this target; overlapping ranges remain eligible.
+# Target annual base-pay band in CAD. Every stated endpoint must stay inside it.
 TARGET_SALARY_MIN_CAD = 40_000
 TARGET_SALARY_MAX_CAD = 65_000
 
@@ -851,9 +850,13 @@ def salary_reject_reason(salary):
     if not salary:
         return None
     low, high = salary
-    if low is not None and low > TARGET_SALARY_MAX_CAD:
+    if (low is not None and low > TARGET_SALARY_MAX_CAD) or (
+        high is not None and high > TARGET_SALARY_MAX_CAD
+    ):
         return "salary above target"
-    if high is not None and high < TARGET_SALARY_MIN_CAD:
+    if (low is not None and low < TARGET_SALARY_MIN_CAD) or (
+        high is not None and high < TARGET_SALARY_MIN_CAD
+    ):
         return "salary below target"
     return None
 
