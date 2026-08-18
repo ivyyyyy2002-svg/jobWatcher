@@ -27,6 +27,18 @@ Precision note:
 
 Sources with minute-level timestamps are checked against the alert window. LinkedIn or other sources that only show a date cannot prove that a job was posted inside the last hour, so they are skipped in regular alerts to avoid noisy old posts. The first run establishes the baseline; later runs only send new matches that were not already sent before.
 
+### Resume skill matching
+
+After the normal role, experience, and location filters pass, Jobwatch can show a resume match percentage plus matched and missing skills. The percentage is the share of recognized technical skills in the posting that also appear in the resume profile; it is a useful keyword-coverage indicator, not a hiring prediction.
+
+The committed `skills_profile.json` contains only the user-approved technical skill list extracted from the resume. It contains no resume text, name, contact information, address, education history, or other personal details. Both local runs and GitHub Actions load this profile automatically.
+
+To replace the profile later, place `resume.pdf`, `resume.docx`, or `resume.txt` beside `jobwatch.py`, or set `JOBWATCH_RESUME_PATH`. Resume files and temporary `resume_skills.json` profiles are gitignored and are never uploaded by the script.
+
+For GitHub Actions, add a repository secret named `JOBWATCH_RESUME_SKILLS` containing a comma-separated list such as `Python, Java, React, SQL, AWS, Docker`. Expose that secret to the workflow environment. This lets scheduled runs calculate scores without committing the full resume.
+
+If no resume or skill profile is configured, Jobwatch continues normally without displaying match scores.
+
 ---
 
 ## Files

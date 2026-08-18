@@ -283,6 +283,127 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"}
 TIMEOUT = 20
 
+# --- Resume skill matching ---
+# Local use: point this at a PDF, DOCX, TXT, or JSON skill profile.
+# GitHub Actions: set JOBWATCH_RESUME_SKILLS to a comma-separated skill list.
+RESUME_PATH = os.environ.get("JOBWATCH_RESUME_PATH", "")
+RESUME_SKILLS_ENV = os.environ.get("JOBWATCH_RESUME_SKILLS", "")
+
+SKILL_PATTERNS = {
+    "Python": r"\bpython\b", "Java": r"\bjava\b(?!script)",
+    "JavaScript": r"\b(?:javascript|js)\b", "TypeScript": r"\b(?:typescript|ts)\b",
+    "C": r"(?<![+#])\bc\b(?![+#])", "C++": r"(?<!\w)c\+\+(?!\w)",
+    "C#": r"(?<!\w)c#(?!\w)", "Go": r"\b(?:golang|go)\b", "Rust": r"\brust\b",
+    "SQL": r"\bsql\b", "HTML/CSS": r"\b(?:html|css|sass|scss)\b",
+    "React": r"\breact(?:\.js|js)?\b", "Angular": r"\bangular\b",
+    "Vue": r"\bvue(?:\.js|js)?\b", "Node.js": r"\bnode(?:\.js|js)?\b",
+    "Django": r"\bdjango\b", "Flask": r"\bflask\b", "FastAPI": r"\bfastapi\b",
+    "Spring": r"\bspring(?:\s+boot)?\b", ".NET": r"(?<!\w)(?:\.net|dotnet)\b",
+    "AWS": r"\b(?:aws|amazon web services)\b", "Azure": r"\bazure\b",
+    "GCP": r"\b(?:gcp|google cloud)\b", "Docker": r"\bdocker\b",
+    "Kubernetes": r"\b(?:kubernetes|k8s)\b", "Terraform": r"\bterraform\b",
+    "Git": r"\bgit(?:hub|lab)?\b", "Linux": r"\blinux\b",
+    "PostgreSQL": r"\b(?:postgresql|postgres)\b", "MySQL": r"\bmysql\b",
+    "MongoDB": r"\bmongodb\b", "Redis": r"\bredis\b", "Spark": r"\bspark\b",
+    "Kafka": r"\bkafka\b", "Airflow": r"\bairflow\b",
+    "Machine Learning": r"\b(?:machine learning|ml)\b",
+    "PyTorch": r"\bpytorch\b", "TensorFlow": r"\btensorflow\b",
+    "pandas": r"\bpandas\b", "scikit-learn": r"\bscikit(?:-learn)?\b",
+    "REST APIs": r"\b(?:restful|rest api|rest APIs)\b", "GraphQL": r"\bgraphql\b",
+    "CI/CD": r"\b(?:ci/cd|continuous integration|continuous delivery)\b",
+    "Selenium": r"\bselenium\b", "Cypress": r"\bcypress\b",
+    "Playwright": r"\bplaywright\b",
+    "Verilog": r"\b(?:verilog|systemverilog)\b",
+    "Express": r"\bexpress(?:\.js|js)?\b",
+    "React Native": r"\breact\s+native\b",
+    "Dart": r"\bdart\b", "Flutter": r"\bflutter\b",
+    "Arduino": r"\barduino\b", "Figma": r"\bfigma\b",
+    "SolidWorks": r"\bsolidworks\b",
+    "Full-stack Development": r"\bfull[\s-]*stack\s+(?:development|engineering)\b",
+    "Web Development": r"\bweb\s+(?:application\s+)?development\b",
+    "Computer Networks": r"\bcomputer\s+networks?\b",
+    "Network Security": r"\b(?:network|cyber)\s*security\b",
+    "Operating Systems": r"\boperating\s+systems?\b",
+    "Computer Architecture": r"\bcomputer\s+architecture\b",
+    "Data Analytics": r"\bdata\s+analytics\b",
+    "Cloud Computing": r"\bcloud\s+computing\b",
+    "Hardware-Software Integration": r"\bhardware[\s-]+software\s+integration\b",
+}
+
+
+def extract_skills(text):
+    """Return canonical skills found in resume or job text."""
+    value = text or ""
+    return {
+        skill for skill, pattern in SKILL_PATTERNS.items()
+        if re.search(pattern, value, re.I)
+    }
+
+
+def read_resume_text(path):
+    """Extract text locally; the resume is never uploaded by this script."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".txt", ".md"):
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+    if ext == ".json":
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            data = data.get("skills", [])
+        return " ".join(str(item) for item in data)
+    if ext == ".pdf":
+        from pypdf import PdfReader
+        return "\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
+    if ext == ".docx":
+        from docx import Document
+        return "\n".join(p.text for p in Document(path).paragraphs)
+    raise ValueError("resume must be PDF, DOCX, TXT, MD, or JSON")
+
+
+def load_resume_skills():
+    """Load a private skill profile from env or a local resume/profile file."""
+    if RESUME_SKILLS_ENV.strip():
+        raw = {item.strip() for item in RESUME_SKILLS_ENV.split(",") if item.strip()}
+        # Preserve known canonical names while still accepting custom skills.
+        known = extract_skills(" ".join(raw))
+        return known | {item for item in raw if item in SKILL_PATTERNS}
+
+    candidates = [RESUME_PATH] if RESUME_PATH else []
+    base = os.path.dirname(os.path.abspath(__file__))
+    candidates.extend(os.path.join(base, name) for name in (
+        "skills_profile.json", "resume_skills.json", "resume.pdf",
+        "resume.docx", "resume.txt"
+    ))
+    for path in candidates:
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            skills = extract_skills(read_resume_text(path))
+            print(f"[resume] loaded {len(skills)} skills from {os.path.basename(path)}")
+            return skills
+        except Exception as e:
+            print(f"[resume] could not read {path}: {e}")
+    print("[resume] no profile configured; match scores disabled")
+    return set()
+
+
+def add_skill_match(job, resume_skills):
+    """Annotate one job with requirement coverage based on recognized skills."""
+    if not resume_skills:
+        return
+    job_text = " ".join((
+        str(job.get("title") or ""), str(job.get("description") or "")
+    ))
+    job_skills = extract_skills(job_text)
+    if not job_skills:
+        return
+    matched = sorted(job_skills & resume_skills)
+    missing = sorted(job_skills - resume_skills)
+    job["match_score"] = round(100 * len(matched) / len(job_skills))
+    job["matched_skills"] = matched
+    job["missing_skills"] = missing
+
 # ============================================================
 # 2. Database (dedup) - track jobs already pushed
 # ============================================================
@@ -631,6 +752,7 @@ def parse_jobposting_page(page_url, html, fallback_company):
                 "company": company,
                 "location": location,
                 "url": job_url,
+                "description": description,
                 "posted_ts": posted_ts,
                 "first_seen_fallback": posted_ts is None,
                 "reject_reason": reject_reason(title, description, location),
@@ -770,6 +892,7 @@ def fetch_bamboohr():
                     "company": company,
                     "location": location,
                     "url": job_url,
+                    "description": description,
                     "posted_ts": None,
                     "first_seen_fallback": True,
                     "reject_reason": reject_reason(title, description, location),
@@ -802,6 +925,7 @@ def fetch_greenhouse():
                 desc = j.get("content", "")
                 out.append({"title": title, "company": slug,
                             "location": loc, "url": j.get("absolute_url", ""),
+                            "description": desc,
                             "posted_ts": parse_iso(j.get("first_published")
                                                     or j.get("updated_at")),
                             "reject_reason": reject_reason(title, desc, loc),
@@ -825,6 +949,7 @@ def fetch_lever():
                 pts = int(cts / 1000) if isinstance(cts, (int, float)) else None
                 out.append({"title": title, "company": slug,
                             "location": loc, "url": j.get("hostedUrl", ""),
+                            "description": desc,
                             "posted_ts": pts,
                             "reject_reason": reject_reason(title, desc, loc),
                             "note": match_note(title, desc)})
@@ -864,6 +989,7 @@ def fetch_ashby():
                     "company": slug,
                     "location": loc,
                     "url": j.get("jobUrl") or j.get("applyUrl") or "",
+                    "description": desc,
                     "posted_ts": parse_iso(posted),
                     "reject_reason": reject_reason(title, desc, loc),
                     "note": match_note(title, desc),
@@ -994,6 +1120,7 @@ def fetch_indeed():
                     "company": company,
                     "location": job_loc,
                     "url": link,
+                    "description": desc,
                     "posted_ts": parse_rss_date(pub),
                     "reject_reason": reject_reason(title, desc, job_loc),
                     "note": match_note(title, desc),
@@ -1035,6 +1162,7 @@ def fetch_community():
                     "company": j.get("company_name", label),
                     "location": loc,
                     "url": j.get("url", ""),
+                    "description": desc,
                     "posted_ts": dp or None,
                     "reject_reason": reject_reason(title, desc, loc),
                     "note": match_note(title, desc),
@@ -1114,10 +1242,16 @@ def format_block(j):
         bits.append(j["time_label"])
     elif ago:
         bits.append(ago)
+    if "match_score" in j:
+        bits.append(f"resume match {j['match_score']}%")
     line2 = " · ".join(bits)
     lines = [line1]
     if line2:
         lines.append(line2)
+    if j.get("matched_skills"):
+        lines.append("Matched: " + ", ".join(j["matched_skills"][:6]))
+    if j.get("missing_skills"):
+        lines.append("Check: " + ", ".join(j["missing_skills"][:4]))
     return "\n".join(lines)
 
 def compact_job_label(j):
@@ -1198,6 +1332,7 @@ def send(jobs, header=None):
 
 def collect_all_jobs():
     all_jobs = []
+    resume_skills = load_resume_skills()
     fetchers = [
         fetch_bamboohr, fetch_generic_careers, fetch_greenhouse, fetch_lever,
         fetch_ashby, fetch_workday, fetch_community, fetch_indeed,
@@ -1220,6 +1355,8 @@ def collect_all_jobs():
                     # Company-aware London, Ontario exception. Most fetchers
                     # perform the initial location check before company policy.
                     job["reject_reason"] = None
+                if not job.get("reject_reason"):
+                    add_skill_match(job, resume_skills)
             all_jobs.extend(jobs)
             print(f"[source:{source}] fetched {len(jobs)} candidates")
         except Exception as e:
