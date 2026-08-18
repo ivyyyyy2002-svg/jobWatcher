@@ -9,16 +9,19 @@ Messages include posting time or age when available, with the newest jobs first.
 
 Current filtering rules:
 
-- Location must be in Canada. Remote roles are allowed only when the posting clearly supports Canada.
-- Intern / co-op roles must fit Fall 2026, September-December, or a 4-month term. Internships explicitly listed as 6, 8, 12, 16 months, or year-long are skipped.
-- New grad / entry-level / junior roles are allowed if they are for 2026 or can start in September or later.
+- Location must be in the Greater Toronto Area or a nearby commuter city, including Toronto, Mississauga, North York, Markham, Richmond Hill, Vaughan, Newmarket, Oakville, Pickering, Whitby, Oshawa, and similar nearby locations.
+- Remote roles are allowed when the location explicitly says Canada, Canadian, or Ontario remote; ambiguous or US remote roles are skipped.
+- London, Ontario roles are allowed only for major established companies on the configured allow-list.
+- Intern, internship, co-op, and student roles are skipped.
+- Only engineering/technology-related new-grad, entry-level, junior, associate, or early-career roles are kept.
+- Any posting that requires one or more years of experience is skipped, regardless of its title. This includes wording such as `1+ years`, `1-2 years`, `minimum 1 year`, and all higher experience requirements.
+- `Jobright.ai` is always excluded.
 - Jobs that explicitly require Canadian citizenship are skipped.
 - Jobs with a hard French or bilingual French requirement are skipped.
 - Senior, staff, principal, lead, manager, director, architect, executive, VP, and similar senior-level roles are skipped.
 - PhD / doctorate-only roles are skipped.
 - Jobs with hard requirements for clearly unrelated majors, such as accounting, nursing, mechanical engineering, civil engineering, or chemical engineering, are skipped.
-- If the title is vague but the description looks relevant and has no hard blocker, the job can still be sent with a note such as `term/duration not explicit; please verify`.
-- Sources include company ATS boards, community feeds, LinkedIn, and Indeed. The search terms are intentionally broad, while the filtering rules decide what actually gets sent.
+- Sources include company career pages and official ATS boards (Greenhouse, Lever, Ashby, Workday, and BambooHR), plus Indeed, LinkedIn, and the new-grad community feed. The expanded direct-company list is intended to provide a healthier mix instead of relying mostly on LinkedIn.
 
 Precision note:
 
@@ -289,7 +292,7 @@ Open the config area in `jobwatch.py`.
 - `LINKEDIN_QUERIES` and `INDEED_QUERIES` control broad search queries.
 - `ROLE_RE` controls the role keywords.
 - `LOCATION_INCLUDE` controls the Canada location whitelist.
-- The reject keyword lists control hard blockers such as seniority, citizenship, French requirements, unrelated majors, and long internship durations.
+- The reject keyword lists control hard blockers such as internships/co-ops, seniority, citizenship, French requirements, and unrelated majors.
 
 The broad search queries are intentionally loose. The filter rules should be the strict part.
 

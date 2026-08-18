@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-jobwatch.py - watcher for 2026 Fall intern / new-grad / entry-level roles
+jobwatch.py - watcher for GTA new-grad / entry-level engineering roles
 
 监控来源:
   - Greenhouse (public JSON API, most reliable)
@@ -46,10 +46,6 @@ ROLE_RE = re.compile(
     r"it|analyst)\b|实习",
     re.I,
 )
-# Term signal words (Fall 2026). Hitting any one counts as the target term.
-TERM_RE = re.compile(r"\b(2026|fall|autumn|september|sept|sep|new\s*grad)\b", re.I)
-# Explicitly belongs to another term -> drop it.
-OTHER_TERM_RE = re.compile(r"\b(summer|spring|winter)\s*20(25|27)\b|\b2025\b|\b2027\b", re.I)
 EXCLUDE = [
     "phd only",
     "canadian citizenship required",
@@ -62,11 +58,6 @@ EXCLUDE = [
     "fluent in french",
     "bilingual french",
 ]
-
-# Filter mode:
-#   "strict" = must be a target role AND mention 2026/fall
-#   "loose"  = target role and not tagged as another term (best early in the cycle)
-FILTER_MODE = "loose"
 
 # --- Freshness (alert mode) ---
 # Each alert run only notifies about jobs whose minute-precise posting time
@@ -89,17 +80,43 @@ JOBWATCH_TIMEZONE = ZoneInfo("America/Toronto")
 # can't enumerate every US city, but you CAN enumerate the places you want.
 LOCATION_MODE = "whitelist"
 
-# Whitelist: keep a job only if its location contains any of these.
-# Canada only (no remote, no China) per your request.
+# Whitelist: Greater Toronto Area and nearby commuter cities only. Do not add
+# broad markers such as "Canada", "Ontario", or ", ON" here: those would let
+# jobs elsewhere in the province/country through.
 LOCATION_INCLUDE = [
-    "canada", "ontario", "quebec", "british columbia", "alberta",
-    "manitoba", "saskatchewan", "nova scotia", "new brunswick",
-    "toronto", "vancouver", "montreal", "ottawa", "waterloo", "kitchener",
-    "calgary", "edmonton", "mississauga", "hamilton", "halifax", "winnipeg",
-    "victoria", "kingston", "oshawa", "oakville", "burnaby", "markham",
-    "richmond hill", "brampton", "guelph", "windsor", "regina", "saskatoon",
-    ", on", ", bc", ", qc", ", ab", ", mb", ", sk", ", ns", ", nb", ", nl",
+    "greater toronto area", "gta", "toronto", "downtown toronto",
+    "north york", "scarborough", "etobicoke", "east york", "york, on",
+    "mississauga", "brampton", "caledon", "bolton",
+    "markham", "richmond hill", "vaughan", "newmarket", "aurora",
+    "whitchurch-stouffville", "stouffville", "king city", "georgina",
+    "oakville", "burlington", "milton", "halton hills", "georgetown, on",
+    "pickering", "ajax", "whitby", "oshawa", "clarington", "bowmanville",
 ]
+
+# Remote roles are useful when they explicitly accept Canadian applicants.
+# A bare "Remote" is too ambiguous and remains excluded.
+REMOTE_CANADA_RE = re.compile(
+    r"\b(remote\s*[-,/()]?\s*(canada|canadian|ontario)|"
+    r"(canada|canadian|ontario)\s*[-,/()]?\s*remote|"
+    r"remote\s+(within|across|in)\s+canada)\b",
+    re.I,
+)
+
+# London, Ontario is outside the normal GTA radius. Keep it only for major,
+# well-established employers where the opportunity can justify the distance.
+LONDON_ON_RE = re.compile(
+    r"\blondon\s*,?\s*(on|ontario|canada)\b|\blondon,\s*ontario,\s*canada\b",
+    re.I,
+)
+LONDON_LARGE_COMPANIES = {
+    "3m", "accenture", "amazon", "amd", "apple", "bell", "bmo", "cibc",
+    "cisco", "deloitte", "ey", "ford", "general dynamics", "google", "ibm",
+    "kpmg", "mastercard", "microsoft", "nvidia", "oracle", "paypal", "pwc",
+    "rbc", "rogers", "salesforce", "scotiabank", "shopify", "td", "td bank",
+    "telus", "thomson reuters", "toyota", "wealthsimple", "workday",
+}
+
+BLOCKED_COMPANIES = {"jobright.ai", "jobright ai", "jobright"}
 # Blacklist (only used when LOCATION_MODE == "blacklist").
 LOCATION_EXCLUDE = [
     "united states", "usa", "u.s.", "u.s.a", ", us",
@@ -116,12 +133,8 @@ KEEP_UNKNOWN_LOCATION = False
 # pages. We read their raw JSON directly = their coverage UNION your own ATS.
 # Set to [] to disable. Each entry: (label, raw_json_url)
 COMMUNITY_REPOS = [
-    ("Simplify-Intern",
-     "https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/.github/scripts/listings.json"),
     ("Simplify-NewGrad",
      "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json"),
-    ("Vansh-Intern",
-     "https://raw.githubusercontent.com/vanshb03/Summer2026-Internships/dev/.github/scripts/listings.json"),
 ]
 # Only keep community postings newer than this many days (avoid back-flooding
 # with thousands of old entries on first run). Set to 0 for no age limit.
@@ -192,6 +205,9 @@ ASHBY_COMPANIES = [
     "browserbase", "turso", "neon", "railway", "render", "tailscale",
     "incidentio", "posthog", "sentry", "sourcegraph", "grafana",
     "deepmind", "scaleai", "adept", "harvey", "gretel", "modal-labs",
+    # Toronto startups / growth companies with official Ashby job boards.
+    "cerebras", "magical", "zip", "relayfi", "viggle", "marble.ai",
+    "mycroft", "Maxima", "terminal",
 ]
 
 # --- Workday: 每家独立, 格式 (公司名, 子域host, tenant, 站点路径) ---
@@ -211,76 +227,35 @@ WORKDAY_COMPANIES = [
 ]
 
 # --- LinkedIn search keywords / location ---
+# Keep LinkedIn enabled, alongside the expanded direct company/ATS sources.
+ENABLE_LINKEDIN = True
 # Keep these broad. LinkedIn search works better with short keyword groups;
 # detailed term/duration/location rules are enforced by the filters below.
 LINKEDIN_QUERIES = [
-    ("software intern", "Canada"),
-    ("developer intern", "Canada"),
-    ("engineering intern", "Canada"),
-    ("engineering student", "Canada"),
-    ("software co-op", "Canada"),
-    ("developer co-op", "Canada"),
-    ("engineering co-op", "Canada"),
-    ("computer science intern", "Canada"),
-    ("computer engineering intern", "Canada"),
-    ("data intern", "Canada"),
-    ("data analyst intern", "Canada"),
-    ("qa intern", "Canada"),
-    ("quality assurance intern", "Canada"),
-    ("test engineering intern", "Canada"),
-    ("cloud intern", "Canada"),
-    ("devops intern", "Canada"),
-    ("security intern", "Canada"),
-    ("IT intern", "Canada"),
-    ("technology intern", "Canada"),
-    ("technical analyst intern", "Canada"),
-    ("new grad engineering", "Canada"),
-    ("new grad software", "Canada"),
-    ("new grad developer", "Canada"),
-    ("new graduate technology", "Canada"),
-    ("junior software", "Canada"),
-    ("junior developer", "Canada"),
-    ("entry level software", "Canada"),
-    ("entry level developer", "Canada"),
-    ("entry level technology", "Canada"),
-    ("technology analyst new grad", "Canada"),
+    ("new grad engineering", "Greater Toronto Area, Canada"),
+    ("new grad software", "Greater Toronto Area, Canada"),
+    ("new grad developer", "Greater Toronto Area, Canada"),
+    ("new graduate technology", "Greater Toronto Area, Canada"),
+    ("junior software", "Greater Toronto Area, Canada"),
+    ("junior developer", "Greater Toronto Area, Canada"),
+    ("entry level engineering", "Greater Toronto Area, Canada"),
+    ("entry level software", "Greater Toronto Area, Canada"),
+    ("entry level developer", "Greater Toronto Area, Canada"),
+    ("entry level technology", "Greater Toronto Area, Canada"),
+    ("technology analyst new grad", "Greater Toronto Area, Canada"),
 ]
 
 # --- Indeed search keywords / location ---
 # Keep these broad. Indeed often returns better results with simple keyword
 # combinations, then the script filters the details.
 INDEED_QUERIES = [
-    ("software intern", "Canada"),
-    ("developer intern", "Canada"),
-    ("engineering intern", "Canada"),
-    ("engineering student", "Canada"),
-    ("software co-op", "Canada"),
-    ("developer co-op", "Canada"),
-    ("engineering co-op", "Canada"),
-    ("computer science intern", "Canada"),
-    ("computer engineering intern", "Canada"),
-    ("data intern", "Canada"),
-    ("data analyst intern", "Canada"),
-    ("qa intern", "Canada"),
-    ("quality assurance intern", "Canada"),
-    ("test engineering intern", "Canada"),
-    ("cloud intern", "Canada"),
-    ("devops intern", "Canada"),
-    ("cybersecurity intern", "Canada"),
-    ("security intern", "Canada"),
-    ("IT intern", "Canada"),
-    ("technology intern", "Canada"),
-    ("technical analyst intern", "Canada"),
-    ("new grad engineering", "Canada"),
-    ("new grad software", "Canada"),
-    ("new grad developer", "Canada"),
-    ("new graduate technology", "Canada"),
-    ("junior software", "Canada"),
-    ("junior developer", "Canada"),
-    ("entry level software", "Canada"),
-    ("entry level developer", "Canada"),
-    ("entry level technology", "Canada"),
-    ("technology analyst new grad", "Canada"),
+    (kw, "Toronto, ON") for kw in (
+        "new grad engineering", "new grad software", "new grad developer",
+        "new graduate technology", "junior software", "junior developer",
+        "entry level engineering", "entry level software",
+        "entry level developer", "entry level technology",
+        "technology analyst new grad",
+    )
 ]
 
 # --- Notification method: pick one ---
@@ -389,31 +364,42 @@ def humanize_age(ts):
 # 3. Keyword filter
 # ============================================================
 
-# Early-career signal: at least one of these must be present, otherwise a plain
-# "Software Engineer" (senior) would slip through.
+# New-grad/entry-level signal: internships, co-ops and student roles are
+# intentionally not included.
 EARLY_RE = re.compile(
-    r"\b(intern|internship|co-?op|new\s*grad|graduate|entry[\s-]*level|"
-    r"early\s*career|early[\s-]*talent|student|university|junior)\b|实习",
+    r"\b(new\s*grad|new\s*graduate|graduate|entry[\s-]*level|"
+    r"early\s*career|early[\s-]*talent|junior|associate)\b",
+    re.I,
+)
+# A role may omit "junior" but explicitly welcome candidates with no experience
+# or up to one year.
+EARLY_EXPERIENCE_RE = re.compile(
+    r"\b0\s*(?:-|–|—|to)\s*1\s*years?\b|"
+    r"\b0\s*years?\s+(of\s+)?(professional\s+)?experience\b|"
+    r"\b(no\s+(professional\s+)?experience|required experience:\s*none)\b",
+    re.I,
+)
+
+# Hard blocker, regardless of title: never send a role whose stated minimum
+# experience is one year or more.
+REQUIRED_EXPERIENCE_RE = re.compile(
+    r"\b(?:at\s+least|minimum(?:\s+of)?|min\.?|requires?|must\s+have|"
+    r"you(?:'ll|\s+will)?\s+(?:need|have)|with)\s+"
+    r"(?:a\s+minimum\s+of\s+)?(?:1|[2-9]\d*)\+?\s*years?"
+    r"(?:\s+of)?\s+(?:relevant\s+|professional\s+|industry\s+)?experience\b|"
+    r"\b(?:1|[2-9]\d*)\+\s*years?\s+(?:of\s+)?"
+    r"(?:relevant\s+|professional\s+|industry\s+)?experience\b|"
+    r"\b(?:1|[2-9]\d*)\s*(?:-|–|—|to)\s*\d+\s*years?\s+(?:of\s+)?"
+    r"(?:relevant\s+|professional\s+|industry\s+)?experience\b|"
+    r"\b(?:1|[2-9]\d*)\s*years?\s+of\s+"
+    r"(?:relevant\s+|professional\s+|industry\s+)?experience\b|"
+    r"\bexperience\s*(?:required)?\s*:\s*(?:1|[2-9]\d*)\+?\s*years?\b",
     re.I,
 )
 INTERN_RE = re.compile(r"\b(intern|internship|co-?op|student)\b|实习", re.I)
 NEW_GRAD_RE = re.compile(
     r"\b(new\s*grad|graduate|entry[\s-]*level|early\s*career|"
     r"early[\s-]*talent|junior)\b",
-    re.I,
-)
-FALL_TERM_RE = re.compile(
-    r"\b(fall|autumn|sept(?:ember)?|sep(?:tember)?|"
-    r"sep\.?\s*(?:-|to|through|–|—)\s*dec\.?|"
-    r"sept\.?\s*(?:-|to|through|–|—)\s*dec\.?|"
-    r"september\s*(?:-|to|through|–|—)\s*december|"
-    r"4\s*[- ]?\s*months?|four\s*months?)\b",
-    re.I,
-)
-LONG_INTERNSHIP_RE = re.compile(
-    r"\b(6|8|12|16)\s*[- ]?\s*(?:-|to|–|—)?\s*months?\b|"
-    r"\b(six|eight|twelve|sixteen)\s*months?\b|"
-    r"\b(year[\s-]*long|one\s*year|1\s*year)\b",
     re.I,
 )
 SENIORITY_EXCLUDE_RE = re.compile(
@@ -452,12 +438,23 @@ def match_reject_reason(title, description=""):
     blob = t + " " + (description or "")
     if not ROLE_RE.search(blob):
         return "role"
-    if not EARLY_RE.search(blob):
+    # Titles are authoritative. Also catch descriptions that explicitly define
+    # the opening as an internship/co-op, without rejecting a full-time role
+    # merely because its boilerplate mentions an internship program.
+    explicit_intern_desc = re.search(
+        r"\b(this|the)\s+(position|role|opportunity)\s+is\s+(an?\s+)?"
+        r"(internship|co-?op)\b",
+        description or "",
+        re.I,
+    )
+    if INTERN_RE.search(t) or explicit_intern_desc:
+        return "intern/co-op"
+    if REQUIRED_EXPERIENCE_RE.search(blob):
+        return "experience (1+ years)"
+    if not (EARLY_RE.search(blob) or EARLY_EXPERIENCE_RE.search(blob)):
         return "level"
     if SENIORITY_EXCLUDE_RE.search(blob):
         return "seniority"
-    if OTHER_TERM_RE.search(blob):         # tagged as another term -> drop
-        return "term"
     if PHD_RE.search(blob):
         return "PhD"
     if CITIZENSHIP_RE.search(blob):
@@ -468,20 +465,11 @@ def match_reject_reason(title, description=""):
         return "hard requirement"
     if UNRELATED_MAJOR_RE.search(blob):
         return "major"
-    if INTERN_RE.search(blob):
-        if LONG_INTERNSHIP_RE.search(blob):
-            return "duration"
-    if FILTER_MODE == "strict":
-        return None if TERM_RE.search(blob) else "term"
-    return None                            # loose: keep early-career role
+    return None
 
 def match_note(title, description=""):
     t = title or ""
     blob = t + " " + (description or "")
-    if INTERN_RE.search(blob) and not FALL_TERM_RE.search(blob):
-        return "term/duration not explicit; please verify"
-    if NEW_GRAD_RE.search(blob) and not TERM_RE.search(blob):
-        return "start term not explicit; please verify"
     return ""
 
 def matches(title, description=""):
@@ -492,11 +480,28 @@ def reject_reason(title, description, location):
     if reason:
         return reason
     if not location_ok(location):
-        return "location (not Canada)"
+        return "location (outside GTA)"
     return None
 
 
-def location_ok(loc):
+def normalized_company(company):
+    """Normalize a company label for block/allow-list decisions."""
+    return re.sub(r"[^a-z0-9]+", " ", company.lower()).strip()
+
+
+def company_blocked(company):
+    low = normalized_company(company or "")
+    blocked = {normalized_company(name) for name in BLOCKED_COMPANIES}
+    return any(low == name or low.startswith(name + " ") for name in blocked)
+
+
+def london_large_company(company):
+    low = normalized_company(company or "")
+    return any(low == name or low.startswith(name + " ")
+               for name in LONDON_LARGE_COMPANIES)
+
+
+def location_ok(loc, company=""):
     """Decide whether to keep a job based on its location string."""
     if not loc or not loc.strip():
         return KEEP_UNKNOWN_LOCATION
@@ -505,19 +510,20 @@ def location_ok(loc):
         # Guard: a "remote" string that also names a US place is still US.
         us_markers = ["united states", "usa", "u.s", ", us", "- us", "-us",
                       "remote us", "us remote", "us-remote", "remote-us",
-                      "(us)", "(usa)", "u.s.",
+                      "(us)", "(usa)", "/ us", "us /", "u.s.",
                       "california", "new york", "san francisco", "seattle",
                       "austin", "boston", "chicago", "atlanta", "denver",
-                      "los angeles", "texas", ", ca", ", wa", ", ny", ", tx",
+                      "los angeles", "texas", ", wa", ", ny", ", tx",
                       ", ma", ", il", ", co", ", ga", ", fl", ", or", ", nj"]
         has_include = any(x in low for x in LOCATION_INCLUDE)
         has_us = any(x in low for x in us_markers)
-        if not has_include:
+        if has_us:
             return False
-        # If it matched only via "remote" but also carries a US marker, drop it.
-        if has_us and not any(
-            x in low for x in LOCATION_INCLUDE if x != "remote"
-        ):
+        if REMOTE_CANADA_RE.search(loc):
+            return True
+        if LONDON_ON_RE.search(loc) and london_large_company(company):
+            return True
+        if not has_include:
             return False
         return True
     # blacklist mode
@@ -891,7 +897,7 @@ def fetch_workday():
     out = []
     for name, host, tenant, site in WORKDAY_COMPANIES:
         url = f"https://{host}/wday/cxs/{tenant}/{site}/jobs"
-        for search in ("intern", "new grad", "co-op"):
+        for search in ("new grad", "entry level", "junior"):
             try:
                 offset = 0
                 while True:
@@ -1192,14 +1198,28 @@ def send(jobs, header=None):
 
 def collect_all_jobs():
     all_jobs = []
-    for fn in (fetch_bamboohr, fetch_generic_careers, fetch_greenhouse,
-               fetch_lever, fetch_ashby, fetch_workday, fetch_community,
-               fetch_linkedin, fetch_indeed):
+    fetchers = [
+        fetch_bamboohr, fetch_generic_careers, fetch_greenhouse, fetch_lever,
+        fetch_ashby, fetch_workday, fetch_community, fetch_indeed,
+    ]
+    if ENABLE_LINKEDIN:
+        fetchers.append(fetch_linkedin)
+    for fn in fetchers:
         try:
             jobs = fn()
             source = fn.__name__.removeprefix("fetch_")
             for job in jobs:
                 job.setdefault("source", source)
+                company = job.get("company", "")
+                if company_blocked(company):
+                    job["reject_reason"] = "blocked company"
+                elif (
+                    job.get("reject_reason") == "location (outside GTA)"
+                    and location_ok(job.get("location", ""), company)
+                ):
+                    # Company-aware London, Ontario exception. Most fetchers
+                    # perform the initial location check before company policy.
+                    job["reject_reason"] = None
             all_jobs.extend(jobs)
             print(f"[source:{source}] fetched {len(jobs)} candidates")
         except Exception as e:
