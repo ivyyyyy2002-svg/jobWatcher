@@ -60,10 +60,22 @@ EXCLUDE = [
 ]
 
 # --- Freshness (alert mode) ---
-# Each alert run only notifies about jobs whose minute-precise posting time
-# falls within this window. The dedup DB still prevents repeats if a job appears
-# in overlapping runs.
-ALERT_WINDOW_MINUTES = 120
+# Each alert run only notifies about jobs whose verified original posting time
+# falls within this window. The dedup DB prevents repeats across overlapping runs.
+# Only roles whose original posting time is within the last day are eligible.
+ALERT_WINDOW_MINUTES = 24 * 60
+REQUIRE_VERIFIED_DETAILS = True
+DETAIL_MIN_DESCRIPTION_CHARS = 200
+DETAIL_PAGE_DELAY_SECONDS = 0.15
+
+# LinkedIn quality controls. Explicit reposts are always excluded; extremely
+# high applicant counts are treated as stale/low-value recruiting inventory.
+LINKEDIN_MAX_APPLICANTS = 999
+
+# Target annual base-pay band in CAD. A range is rejected when its entire
+# stated band sits below/above this target; overlapping ranges remain eligible.
+TARGET_SALARY_MIN_CAD = 40_000
+TARGET_SALARY_MAX_CAD = 65_000
 
 # --- Daily digest ---
 # A separate "digest" run (meant for ~midnight) summarizes everything posted
@@ -397,6 +409,8 @@ def add_skill_match(job, resume_skills):
     ))
     job_skills = extract_skills(job_text)
     if not job_skills:
+        job["match_score"] = None
+        job["match_note"] = "no comparable technical skills found in JD"
         return
     matched = sorted(job_skills & resume_skills)
     missing = sorted(job_skills - resume_skills)
@@ -517,6 +531,13 @@ REQUIRED_EXPERIENCE_RE = re.compile(
     r"\bexperience\s*(?:required)?\s*:\s*(?:1|[2-9]\d*)\+?\s*years?\b",
     re.I,
 )
+ANY_ONE_PLUS_EXPERIENCE_RE = re.compile(
+    r"(?<![\d-])\b(?:1|[2-9]\d*)\+?\s*years?\b"
+    r"[^.;\n]{0,80}\bexperience\b|"
+    r"(?<![\d-])\b(?:1|[2-9]\d*)\s*(?:-|–|—|to)\s*\d+\s*years?\b"
+    r"[^.;\n]{0,80}\bexperience\b",
+    re.I,
+)
 INTERN_RE = re.compile(r"\b(intern|internship|co-?op|student)\b|实习", re.I)
 NEW_GRAD_RE = re.compile(
     r"\b(new\s*grad|graduate|entry[\s-]*level|early\s*career|"
@@ -553,12 +574,38 @@ UNRELATED_MAJOR_RE = re.compile(
     r")\b",
     re.I,
 )
+UNRELATED_ENGINEERING_TITLE_RE = re.compile(
+    r"\b(mechanical|civil|chemical|industrial|aerospace|environmental|"
+    r"nuclear|structural|geotechnical|mining)\s+engineer(?:ing)?\b",
+    re.I,
+)
+
+
+def requires_one_plus_years(text):
+    """Detect stated job requirements while allowing explicit 0-N ranges."""
+    value = text or ""
+    value = re.sub(
+        r"\b0\s*(?:-|–|—|to)\s*\d+\s*years?\b[^.;\n]{0,80}\bexperience\b",
+        "",
+        value,
+        flags=re.I,
+    )
+    matches = list(REQUIRED_EXPERIENCE_RE.finditer(value))
+    matches.extend(ANY_ONE_PLUS_EXPERIENCE_RE.finditer(value))
+    for match in sorted(matches, key=lambda item: item.start()):
+        context = value[max(0, match.start() - 50):match.end() + 20].lower()
+        if re.search(r"\b(?:we|our\s+(?:company|team)|the\s+company)\s+ha(?:s|ve)\b", context):
+            continue
+        return True
+    return False
 
 def match_reject_reason(title, description=""):
     t = title or ""
     blob = t + " " + (description or "")
     if not ROLE_RE.search(blob):
         return "role"
+    if UNRELATED_ENGINEERING_TITLE_RE.search(t):
+        return "unrelated engineering field"
     # Titles are authoritative. Also catch descriptions that explicitly define
     # the opening as an internship/co-op, without rejecting a full-time role
     # merely because its boilerplate mentions an internship program.
@@ -570,11 +617,11 @@ def match_reject_reason(title, description=""):
     )
     if INTERN_RE.search(t) or explicit_intern_desc:
         return "intern/co-op"
-    if REQUIRED_EXPERIENCE_RE.search(blob):
+    if requires_one_plus_years(blob):
         return "experience (1+ years)"
     if not (EARLY_RE.search(blob) or EARLY_EXPERIENCE_RE.search(blob)):
         return "level"
-    if SENIORITY_EXCLUDE_RE.search(blob):
+    if SENIORITY_EXCLUDE_RE.search(t):
         return "seniority"
     if PHD_RE.search(blob):
         return "PhD"
@@ -724,6 +771,264 @@ def schema_job_location(posting):
     if allowed and posting.get("jobLocationType") == "TELECOMMUTE":
         return f"Remote - {', '.join(allowed)}"
     return ""
+
+
+def parse_salary_amount(value):
+    """Normalize a salary number such as 65k or 65,000."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip().lower().replace(",", "")
+    match = re.fullmatch(r"\$?\s*(\d+(?:\.\d+)?)\s*(k)?", text)
+    if not match:
+        return None
+    amount = float(match.group(1))
+    if match.group(2):
+        amount *= 1000
+    return amount
+
+
+def annualize_salary(low, high, unit="YEAR"):
+    if low is None and high is None:
+        return None
+    unit = str(unit or "YEAR").upper()
+    multiplier = 2080 if "HOUR" in unit else 1
+    low = round(low * multiplier) if low is not None else None
+    high = round(high * multiplier) if high is not None else None
+    return (low, high)
+
+
+def salary_from_schema(posting):
+    base = posting.get("baseSalary") or posting.get("estimatedSalary") or {}
+    if not isinstance(base, dict):
+        return None
+    value = base.get("value", base)
+    if isinstance(value, (int, float, str)):
+        amount = parse_salary_amount(value)
+        return annualize_salary(amount, amount, base.get("unitText"))
+    if not isinstance(value, dict):
+        return None
+    low = parse_salary_amount(value.get("minValue") or value.get("value"))
+    high = parse_salary_amount(value.get("maxValue") or value.get("value"))
+    return annualize_salary(low, high, value.get("unitText") or base.get("unitText"))
+
+
+def salary_from_text(text):
+    """Extract the first credible CAD/$ salary band from job-description text."""
+    value = (text or "").replace("\u00a0", " ")
+    amount = r"(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{2,3}(?:\.\d+)?\s*[kK]?)"
+    currency = r"(?:CA\$|CAD\s*\$?|\$)"
+    range_re = re.compile(
+        rf"{currency}\s*({amount})\s*(?:-|–|—|to)\s*"
+        rf"(?:{currency}\s*)?({amount})([^.;\n]{{0,40}})",
+        re.I,
+    )
+    for match in range_re.finditer(value):
+        low = parse_salary_amount(match.group(1))
+        high = parse_salary_amount(match.group(2))
+        if low is None or high is None:
+            continue
+        unit = "HOUR" if re.search(r"\b(?:hour|hourly|hr)\b", match.group(3), re.I) else "YEAR"
+        result = annualize_salary(min(low, high), max(low, high), unit)
+        if result and 20_000 <= (result[1] or 0) <= 500_000:
+            return result
+
+    single_re = re.compile(
+        rf"(?:salary|compensation|base\s+pay|starting\s+(?:salary|at)|"
+        rf"pay\s+range)[^.;\n]{{0,35}}{currency}\s*({amount})([^.;\n]{{0,30}})",
+        re.I,
+    )
+    match = single_re.search(value)
+    if match:
+        number = parse_salary_amount(match.group(1))
+        unit = "HOUR" if re.search(r"\b(?:hour|hourly|hr)\b", match.group(2), re.I) else "YEAR"
+        result = annualize_salary(number, number, unit)
+        if result and 20_000 <= (result[0] or 0) <= 500_000:
+            return result
+    return None
+
+
+def salary_reject_reason(salary):
+    if not salary:
+        return None
+    low, high = salary
+    if low is not None and low > TARGET_SALARY_MAX_CAD:
+        return "salary above target"
+    if high is not None and high < TARGET_SALARY_MIN_CAD:
+        return "salary below target"
+    return None
+
+
+def format_salary(salary):
+    if not salary:
+        return ""
+    low, high = salary
+    if low is not None and high is not None and low != high:
+        return f"CAD ${low:,.0f}-${high:,.0f}"
+    amount = low if low is not None else high
+    return f"CAD ${amount:,.0f}" if amount is not None else ""
+
+
+def iter_nested_dicts(value):
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from iter_nested_dicts(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from iter_nested_dicts(item)
+
+
+def parse_relative_age(text):
+    match = re.search(r"\b(\d+)\s+(minute|hour|day)s?\s+ago\b", text or "", re.I)
+    if not match:
+        return None
+    count = int(match.group(1))
+    seconds = {"minute": 60, "hour": 3600, "day": 86400}[match.group(2).lower()]
+    return int(time.time() - count * seconds)
+
+
+def extract_detail_page(html, page_url=""):
+    """Extract full JD and quality metadata from a public job-detail page."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    result = {
+        "description": "", "posted_ts": None, "salary": None,
+        "is_repost": False, "applicant_count": None, "detail_url": page_url,
+        "location": "",
+    }
+    parsed_scripts = []
+    for script in soup.select("script"):
+        raw = script.string or script.get_text() or ""
+        if not raw.lstrip().startswith(("{", "[")):
+            continue
+        try:
+            data = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        parsed_scripts.append(data)
+        for posting in iter_jobposting_schema(data):
+            raw_desc = str(posting.get("description") or "")
+            desc = BeautifulSoup(raw_desc, "html.parser").get_text(" ", strip=True)
+            if len(desc) > len(result["description"]):
+                result["description"] = desc
+            result["posted_ts"] = result["posted_ts"] or parse_iso(posting.get("datePosted"))
+            result["salary"] = result["salary"] or salary_from_schema(posting)
+            result["location"] = result["location"] or schema_job_location(posting)
+
+    # Workday, Simplify and several JS job boards embed posting data in app
+    # state rather than standards-based JobPosting JSON-LD.
+    for data in parsed_scripts:
+        for node in iter_nested_dicts(data):
+            raw_desc = node.get("jobDescription") or node.get("descriptionHtml")
+            if not raw_desc and isinstance(node.get("description"), str):
+                raw_desc = node.get("description")
+            if raw_desc:
+                desc = BeautifulSoup(str(raw_desc), "html.parser").get_text(" ", strip=True)
+                if len(desc) > len(result["description"]):
+                    result["description"] = desc
+            if not result["posted_ts"]:
+                for key in ("datePosted", "publishedAt", "firstPublished", "createdAt"):
+                    result["posted_ts"] = parse_iso(node.get(key))
+                    if result["posted_ts"]:
+                        break
+
+    if len(result["description"]) < DETAIL_MIN_DESCRIPTION_CHARS:
+        selectors = (
+            ".show-more-less-html__markup", ".description__text",
+            "[data-automation-id='jobPostingDescription']", ".job-description",
+            ".jobDescription", "#job-description", "article",
+        )
+        candidates = []
+        for selector in selectors:
+            for node in soup.select(selector):
+                text = node.get_text(" ", strip=True)
+                if text:
+                    candidates.append(text)
+        if candidates:
+            result["description"] = max(candidates, key=len)
+
+    page_text = soup.get_text(" ", strip=True)
+    if not result["posted_ts"]:
+        time_node = soup.select_one("time[datetime]")
+        if time_node:
+            result["posted_ts"] = parse_iso(time_node.get("datetime"))
+    if not result["posted_ts"]:
+        result["posted_ts"] = parse_relative_age(page_text)
+    result["is_repost"] = bool(re.search(r"\b(?:reposted|re-posted)\b", page_text, re.I))
+    applicant = re.search(
+        r"\b(?:over\s+)?([\d,]+)\+?\s+(?:people\s+clicked\s+apply|applicants?)\b",
+        page_text,
+        re.I,
+    )
+    if applicant:
+        result["applicant_count"] = int(applicant.group(1).replace(",", ""))
+    result["salary"] = result["salary"] or salary_from_text(result["description"])
+    return result
+
+
+DETAIL_REQUIRED_SOURCES = {"linkedin", "indeed", "community", "workday"}
+_DETAIL_CACHE = {}
+
+
+def enrich_job_details(job):
+    """Ensure every potentially eligible job has a verified complete JD."""
+    source = job.get("source", "")
+    existing = str(job.get("description") or "").strip()
+    if "<" in existing and ">" in existing:
+        existing = BeautifulSoup(existing, "html.parser").get_text(" ", strip=True)
+    must_fetch = source in DETAIL_REQUIRED_SOURCES or len(existing) < DETAIL_MIN_DESCRIPTION_CHARS
+    details = {
+        "description": existing,
+        "posted_ts": job.get("posted_ts"),
+        "salary": salary_from_text(existing),
+        "is_repost": False,
+        "applicant_count": None,
+        "detail_url": job.get("url", ""),
+        "location": job.get("location", ""),
+    }
+    if must_fetch:
+        url = job.get("url", "")
+        if not url:
+            return False, "details unavailable"
+        if url in _DETAIL_CACHE:
+            fetched = dict(_DETAIL_CACHE[url])
+        else:
+            try:
+                response = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+                response.raise_for_status()
+                fetched = extract_detail_page(response.text, response.url)
+                _DETAIL_CACHE[url] = dict(fetched)
+                time.sleep(DETAIL_PAGE_DELAY_SECONDS)
+            except Exception as e:
+                print(f"[detail:{source}] {url}: {e}")
+                return False, "details unavailable"
+        # A full detail page takes precedence over feed snippets/metadata.
+        if fetched.get("description"):
+            details["description"] = fetched["description"]
+        details["posted_ts"] = fetched.get("posted_ts") or details["posted_ts"]
+        details["salary"] = fetched.get("salary") or details["salary"]
+        details["is_repost"] = fetched.get("is_repost", False)
+        details["applicant_count"] = fetched.get("applicant_count")
+        details["detail_url"] = fetched.get("detail_url") or url
+        details["location"] = fetched.get("location") or details["location"]
+
+    if len(details["description"]) < DETAIL_MIN_DESCRIPTION_CHARS:
+        return False, "full JD unavailable"
+    job.update(details)
+    job["detail_verified"] = True
+    if details["is_repost"]:
+        return False, "reposted"
+    if (
+        source == "linkedin"
+        and details["applicant_count"] is not None
+        and details["applicant_count"] > LINKEDIN_MAX_APPLICANTS
+    ):
+        return False, "too many LinkedIn applicants"
+    reason = salary_reject_reason(details["salary"])
+    if reason:
+        return False, reason
+    if not details["posted_ts"]:
+        return False, "first posted time unavailable"
+    return True, None
 
 def parse_jobposting_page(page_url, html, fallback_company):
     """Convert JSON-LD JobPosting objects on one public page to job records."""
@@ -1243,7 +1548,11 @@ def format_block(j):
     elif ago:
         bits.append(ago)
     if "match_score" in j:
-        bits.append(f"resume match {j['match_score']}%")
+        score = j["match_score"]
+        bits.append(f"resume match {score}%" if score is not None else "resume match N/A")
+    salary_label = format_salary(j.get("salary"))
+    if salary_label:
+        bits.append(salary_label)
     line2 = " · ".join(bits)
     lines = [line1]
     if line2:
@@ -1252,6 +1561,8 @@ def format_block(j):
         lines.append("Matched: " + ", ".join(j["matched_skills"][:6]))
     if j.get("missing_skills"):
         lines.append("Check: " + ", ".join(j["missing_skills"][:4]))
+    if j.get("match_note"):
+        lines.append("Match note: " + j["match_note"])
     return "\n".join(lines)
 
 def compact_job_label(j):
@@ -1348,13 +1659,23 @@ def collect_all_jobs():
                 company = job.get("company", "")
                 if company_blocked(company):
                     job["reject_reason"] = "blocked company"
-                elif (
-                    job.get("reject_reason") == "location (outside GTA)"
-                    and location_ok(job.get("location", ""), company)
-                ):
-                    # Company-aware London, Ontario exception. Most fetchers
-                    # perform the initial location check before company policy.
-                    job["reject_reason"] = None
+                    continue
+                initial_location = str(job.get("location") or "").strip()
+                if initial_location and not location_ok(initial_location, company):
+                    job["reject_reason"] = "location (outside GTA)"
+                    continue
+                verified, detail_reason = enrich_job_details(job)
+                if REQUIRE_VERIFIED_DETAILS and not verified:
+                    job["reject_reason"] = detail_reason
+                    continue
+                if not location_ok(job.get("location", ""), company):
+                    job["reject_reason"] = "location (outside GTA)"
+                    continue
+                # Re-run hard filters against the complete JD. Jessie overrides
+                # this function with her domain-specific policy.
+                job["reject_reason"] = match_reject_reason(
+                    job.get("title", ""), job.get("description", "")
+                )
                 if not job.get("reject_reason"):
                     add_skill_match(job, resume_skills)
             all_jobs.extend(jobs)
@@ -1365,36 +1686,23 @@ def collect_all_jobs():
     return all_jobs
 
 def run_alert():
-    """Incremental mode: notify ONLY about jobs whose posting time falls within
-    the last ALERT_WINDOW_MINUTES. The dedup DB is a backstop against repeats.
-
-    Jobs without a minute-precise posting time are normally skipped. Configured
-    public career pages may instead alert once when a posting is first seen."""
+    """Notify verified jobs originally posted within the configured window."""
     con = db_init()
     all_jobs = collect_all_jobs()
     now = time.time()
     cutoff = now - ALERT_WINDOW_MINUTES * 60
-
-    def is_date_only(ts):
-        # midnight local time -> the source only gave us a date
-        dt = datetime.fromtimestamp(ts, JOBWATCH_TIMEZONE)
-        return dt.hour == 0 and dt.minute == 0 and dt.second == 0
 
     new_jobs = []
     source_stats = {}
     stats = {
         "fetched": len(all_jobs),
         "no_time": 0,
-        "date_only": 0,
-        "date_only_baselined": 0,
-        "date_only_discovered": 0,
         "outside_window": 0,
         "in_window": 0,
         "duplicate": 0,
         "filtered": 0,
         "examples": [],
     }
-    date_only_baseline_ready = get_meta(con, "date_only_baseline_v1") == "ready"
 
     def increment_source(job, key):
         source = job.get("source", "unknown")
@@ -1412,49 +1720,10 @@ def run_alert():
             continue
         uid = make_uid(j["company"], j["title"], j["url"])
         ts = j.get("posted_ts")
-        if not ts and j.get("first_seen_fallback"):
-            stats["in_window"] += 1
-            increment_source(j, "eligible")
-            increment_source(j, "first_seen")
-            if not is_new(con, uid):
-                stats["duplicate"] += 1
-                increment_source(j, "duplicate")
-                continue
-            j["posted_ts"] = int(now)
-            j["time_label"] = "newly discovered"
-            new_jobs.append(j)
-            increment_source(j, "new")
-            mark_seen(con, uid)
-            continue
         if not ts:
             stats["no_time"] += 1
             increment_source(j, "no_time")
-            add_example(stats, "missing exact time", j)
-            continue
-        if is_date_only(ts):
-            stats["date_only"] += 1
-            increment_source(j, "date_only")
-            if not date_only_baseline_ready:
-                # Establish a quiet baseline once so enabling first-seen alerts
-                # does not flood Discord with every existing date-only posting.
-                if is_new(con, uid):
-                    mark_seen(con, uid)
-                stats["date_only_baselined"] += 1
-                increment_source(j, "date_only_baselined")
-                continue
-            if not is_new(con, uid):
-                stats["duplicate"] += 1
-                increment_source(j, "duplicate")
-                continue
-            stats["in_window"] += 1
-            stats["date_only_discovered"] += 1
-            increment_source(j, "eligible")
-            increment_source(j, "date_only_discovered")
-            j["posted_ts"] = int(now)
-            j["time_label"] = "newly discovered (source provides date only)"
-            new_jobs.append(j)
-            increment_source(j, "new")
-            mark_seen(con, uid)
+            add_example(stats, "first posted time unavailable", j)
             continue
         if ts < cutoff:
             stats["outside_window"] += 1
@@ -1472,14 +1741,6 @@ def run_alert():
         increment_source(j, "new")
         mark_seen(con, uid)
 
-    if not date_only_baseline_ready:
-        set_meta(con, "date_only_baseline_v1", "ready")
-        print(
-            f"Established date-only baseline with "
-            f"{stats['date_only_baselined']} matching postings; future newly "
-            "discovered date-only jobs will alert once."
-        )
-
     print(f"Fetched {len(all_jobs)} jobs, {stats['in_window']} eligible, "
           f"{stats['duplicate']} duplicates, {len(new_jobs)} new to notify")
     for source, counters in source_stats.items():
@@ -1487,10 +1748,6 @@ def run_alert():
             f"[source:{source}] fetched {counters.get('fetched', 0)}, "
             f"filtered {counters.get('filtered', 0)}, "
             f"no time {counters.get('no_time', 0)}, "
-            f"date only {counters.get('date_only', 0)}, "
-            f"date-only baseline {counters.get('date_only_baselined', 0)}, "
-            f"date-only discovered {counters.get('date_only_discovered', 0)}, "
-            f"first seen {counters.get('first_seen', 0)}, "
             f"outside window {counters.get('outside_window', 0)}, "
             f"eligible {counters.get('eligible', 0)}, "
             f"duplicate {counters.get('duplicate', 0)}, "

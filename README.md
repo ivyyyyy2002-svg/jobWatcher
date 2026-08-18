@@ -2,7 +2,7 @@
 
 After setup, your computer can be turned off. GitHub Actions will run the watcher on GitHub's servers.
 
-- **Regular alerts, every 30 minutes**: checks jobs posted in the last 1 hour. For sources with precise posting times, such as company ATS boards and community feeds, the watcher sends only newly posted jobs inside the current window. If there are no new jobs, it still sends a short status message. Sources that only provide a date, without a precise time, are skipped in regular alerts so old jobs are not treated as fresh.
+- **Regular alerts, every 30 minutes**: opens each potentially relevant job page, verifies the full description and original posting time, and keeps only roles first posted within the last 24 hours. Deduplication prevents repeat alerts.
 - **Daily digest, around midnight to 1 AM Eastern time**: sends a 24-hour summary of all matching jobs from the day, grouped in a cleaner format for review.
 
 Messages include posting time or age when available, with the newest jobs first. Each posting is separated clearly, and links are left as plain URLs so Discord can show its own preview card when available.
@@ -15,6 +15,9 @@ Current filtering rules:
 - Intern, internship, co-op, and student roles are skipped.
 - Only engineering/technology-related new-grad, entry-level, junior, associate, or early-career roles are kept.
 - Any posting that requires one or more years of experience is skipped, regardless of its title. This includes wording such as `1+ years`, `1-2 years`, `minimum 1 year`, and all higher experience requirements.
+- Every potentially eligible posting must have a readable full job description and a verifiable original posting time. Feed title/snippet data alone is never enough to notify.
+- Explicit LinkedIn reposts and LinkedIn postings with more than 999 applicants are skipped.
+- Stated annual salary bands entirely below CAD 40,000 or entirely above CAD 65,000 are skipped. Hourly rates are annualized at 2,080 hours for this check.
 - `Jobright.ai` is always excluded.
 - Jobs that explicitly require Canadian citizenship are skipped.
 - Jobs with a hard French or bilingual French requirement are skipped.
@@ -25,7 +28,7 @@ Current filtering rules:
 
 Precision note:
 
-Sources with minute-level timestamps are checked against the alert window. LinkedIn or other sources that only show a date cannot prove that a job was posted inside the last hour, so they are skipped in regular alerts to avoid noisy old posts. The first run establishes the baseline; later runs only send new matches that were not already sent before.
+The watcher does not substitute "first time our script saw the URL" for original publication time. If a complete JD or original posting time cannot be verified, the posting is excluded. Explicit repost markers are also excluded even if the repost date looks recent.
 
 ### Resume skill matching
 
@@ -203,10 +206,10 @@ Open `jobwatch.py` and change `ALERT_WINDOW_MINUTES`.
 The current default is:
 
 ```python
-ALERT_WINDOW_MINUTES = 60
+ALERT_WINDOW_MINUTES = 24 * 60
 ```
 
-This means regular alerts check the last 1 hour. Deduplication still prevents jobs from being sent twice.
+This means regular alerts accept jobs first posted within the last 24 hours. Deduplication still prevents jobs from being sent twice.
 
 **Change the daily digest time**
 
@@ -293,9 +296,8 @@ GENERIC_CAREER_SITES = [
 The generic adapter follows likely job-detail links and reads standard JSON-LD
 `JobPosting` data. Pages that require login, block automated requests, render all
 content only after JavaScript runs, or omit both job links and structured data
-need a site-specific adapter. Configured public career pages without timestamps
-send a one-time `newly discovered` alert when a matching URL is first seen.
-Date-only postings are not treated as minute-precise regular alerts.
+need a site-specific adapter. A posting is not notified when its full description
+or original posting time cannot be verified.
 
 **Change search keywords or location**
 
