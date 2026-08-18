@@ -17,7 +17,7 @@ Current filtering rules:
 - Any posting that requires one or more years of experience is skipped, regardless of its title. This includes wording such as `1+ years`, `1-2 years`, `minimum 1 year`, and all higher experience requirements.
 - Every potentially eligible posting must have a readable full job description and a verifiable original posting time. Feed title/snippet data alone is never enough to notify.
 - Explicit LinkedIn reposts and LinkedIn postings with more than 999 applicants are skipped.
-- Stated annual salary bands entirely below CAD 40,000 or entirely above CAD 65,000 are skipped. Hourly rates are annualized at 2,080 hours for this check.
+- Stated annual salary ranges must stay between CAD 40,000 and CAD 65,000 at both endpoints. Hourly rates are annualized at 2,080 hours for this check.
 - `Jobright.ai` is always excluded.
 - Jobs that explicitly require Canadian citizenship are skipped.
 - Jobs with a hard French or bilingual French requirement are skipped.
