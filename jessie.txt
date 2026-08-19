@@ -29,6 +29,7 @@ EXCLUSIONS:
 4. certificate
 5. PR, citizen
 6. phd only
+7. CMLTO
 ------------------------------
 
 COMPANIES:
