@@ -184,6 +184,7 @@ PHD_ONLY_RE = re.compile(
     r"(?:ph\.?\s*d\.?|doctorate)\b",
     re.I,
 )
+CMLTO_RE = re.compile(r"\bCMLTO\b", re.I)
 ENTRY_TITLE_RE = re.compile(
     r"\b(assistant|associate|coordinator|technician|technologist|analyst|"
     r"specialist|scientist\s*(?:i|1)?|engineer\s*(?:i|1)?|operator|officer|"
@@ -235,6 +236,7 @@ def match_reject_reason(title, description=""):
         (CERTIFICATE_RE, "certificate"),
         (STATUS_RE, "residency/citizenship"),
         (PHD_ONLY_RE, "PhD required"),
+        (CMLTO_RE, "CMLTO registration"),
     )
     for pattern, reason in exclusions:
         if pattern.search(blob):
