@@ -72,6 +72,11 @@ DETAIL_PAGE_DELAY_SECONDS = 0.15
 # high applicant counts are treated as stale/low-value recruiting inventory.
 LINKEDIN_MAX_APPLICANTS = 999
 
+# Do not notify the same company/title again during this cooldown, even when a
+# repost receives a different URL or requisition id. This is deliberately
+# stronger than URL deduplication.
+REPOST_COOLDOWN_DAYS = 7
+
 # Target annual base-pay band in CAD. Every stated endpoint must stay inside it.
 TARGET_SALARY_MIN_CAD = 40_000
 TARGET_SALARY_MAX_CAD = 65_000
@@ -235,6 +240,13 @@ WORKDAY_COMPANIES = [
     ("Mastercard", "mastercard.wd1.myworkdayjobs.com",   "mastercard", "CorporateCareers"),
     ("TD Bank",    "td.wd3.myworkdayjobs.com",           "td",         "TD_Bank_Careers"),
     ("Workday",    "workday.wd5.myworkdayjobs.com",       "workday",    "Workday"),
+    ("Clio",       "clio.wd3.myworkdayjobs.com",          "clio",       "ClioCareerSite"),
+    ("Cisco",      "cisco.wd5.myworkdayjobs.com",         "cisco",      "Cisco_Careers"),
+    ("HPE",        "hpe.wd5.myworkdayjobs.com",           "hpe",        "Jobsathpe"),
+]
+
+SMARTRECRUITERS_COMPANIES = [
+    ("Globant", "Globant2"),
 ]
 
 # --- LinkedIn search keywords / location ---
@@ -256,17 +268,24 @@ LINKEDIN_QUERIES = [
     ("technology analyst new grad", "Greater Toronto Area, Canada"),
 ]
 
-# --- Indeed search keywords / location ---
-# Keep these broad. Indeed often returns better results with simple keyword
-# combinations, then the script filters the details.
-INDEED_QUERIES = [
-    (kw, "Toronto, ON") for kw in (
-        "new grad engineering", "new grad software", "new grad developer",
-        "new graduate technology", "junior software", "junior developer",
-        "entry level engineering", "entry level software",
-        "entry level developer", "entry level technology",
-        "technology analyst new grad",
-    )
+# --- Indeed / Glassdoor search ---
+# JobSpy queries the current Indeed GraphQL search instead of the retired RSS
+# path. A few broader searches provide better small-employer coverage than many
+# near-identical queries. The strict JD filters still run afterwards.
+JOB_BOARD_QUERIES = [
+    "junior software developer",
+    "entry level software engineer",
+    "new graduate technology",
+    "junior data analyst",
+    "junior QA",
+    "associate technology analyst",
+]
+JOB_BOARD_LOCATION = "Toronto, ON"
+JOB_BOARD_RESULTS_PER_QUERY = 60
+ENABLE_GLASSDOOR = True
+JOBSPY_PROXIES = [
+    item.strip() for item in os.environ.get("JOBSPY_PROXIES", "").split(",")
+    if item.strip()
 ]
 
 # --- Notification method: pick one ---
@@ -424,6 +443,11 @@ def add_skill_match(job, resume_skills):
 def db_init():
     con = sqlite3.connect(DB_PATH)
     con.execute("CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY, ts TEXT)")
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS notified_roles ("
+        "role_key TEXT PRIMARY KEY, last_notified_ts INTEGER NOT NULL, "
+        "company TEXT, title TEXT, source TEXT, url TEXT)"
+    )
     con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
     con.commit()
     return con
@@ -448,6 +472,40 @@ def is_new(con, uid):
 def mark_seen(con, uid):
     con.execute("INSERT OR IGNORE INTO seen(id, ts) VALUES(?,?)",
                 (uid, datetime.now(timezone.utc).isoformat()))
+    con.commit()
+
+def normalize_role_text(value):
+    """Stable text for cross-site/repost matching."""
+    text = str(value or "").lower()
+    text = re.sub(r"\([^)]*(?:remote|hybrid|toronto|canada|ontario)[^)]*\)", " ", text)
+    text = re.sub(r"\b(?:job|req|requisition)\s*(?:id|#)?\s*[:#-]?\s*[a-z0-9-]+\b", " ", text)
+    text = re.sub(r"\b(?:new posting|reposted|re-posted)\b", " ", text)
+    return re.sub(r"[^a-z0-9+#]+", " ", text).strip()
+
+def role_key(job):
+    """Semantic identity: URL changes must not turn a repost into a new job."""
+    return make_uid(
+        normalized_company(job.get("company", "")),
+        normalize_role_text(job.get("title", "")),
+    )
+
+def recently_notified(con, key, now_ts=None):
+    cutoff = int(now_ts or time.time()) - REPOST_COOLDOWN_DAYS * 86400
+    row = con.execute(
+        "SELECT 1 FROM notified_roles WHERE role_key=? AND last_notified_ts>=?",
+        (key, cutoff),
+    ).fetchone()
+    return row is not None
+
+def mark_role_notified(con, key, job, now_ts=None):
+    con.execute(
+        "INSERT INTO notified_roles(role_key,last_notified_ts,company,title,source,url) "
+        "VALUES(?,?,?,?,?,?) ON CONFLICT(role_key) DO UPDATE SET "
+        "last_notified_ts=excluded.last_notified_ts, company=excluded.company, "
+        "title=excluded.title, source=excluded.source, url=excluded.url",
+        (key, int(now_ts or time.time()), job.get("company", ""),
+         job.get("title", ""), job.get("source", ""), job.get("url", "")),
+    )
     con.commit()
 
 def make_uid(*parts):
@@ -968,7 +1026,9 @@ def extract_detail_page(html, page_url=""):
     return result
 
 
-DETAIL_REQUIRED_SOURCES = {"linkedin", "indeed", "community", "workday"}
+# Indeed/Glassdoor are omitted because JobSpy supplies the full description.
+# If it is unexpectedly short, the normal length check still fetches the page.
+DETAIL_REQUIRED_SOURCES = {"linkedin", "community", "workday"}
 _DETAIL_CACHE = {}
 
 
@@ -1327,6 +1387,45 @@ def parse_workday_posted(text):
         return int((today - timedelta(days=days)).timestamp())
     return None
 
+def fetch_smartrecruiters():
+    """Fetch official SmartRecruiters boards through their public REST API."""
+    out = []
+    for company, tenant in SMARTRECRUITERS_COMPANIES:
+        offset = 0
+        try:
+            while True:
+                api = f"https://api.smartrecruiters.com/v1/companies/{tenant}/postings"
+                r = requests.get(
+                    api, params={"limit": 100, "offset": offset},
+                    headers=HEADERS, timeout=TIMEOUT,
+                )
+                r.raise_for_status()
+                data = r.json()
+                postings = data.get("content", [])
+                for j in postings:
+                    location = j.get("location") or {}
+                    loc = ", ".join(
+                        str(location.get(k) or "").strip()
+                        for k in ("city", "region", "country") if location.get(k)
+                    )
+                    title = j.get("name", "")
+                    posting_id = j.get("id", "")
+                    job_url = j.get("ref") or (
+                        f"https://jobs.smartrecruiters.com/{tenant}/{posting_id}"
+                    )
+                    out.append({
+                        "title": title, "company": company, "location": loc,
+                        "url": job_url, "posted_ts": parse_iso(j.get("releasedDate")),
+                        "reject_reason": reject_reason(title, "", loc),
+                        "note": match_note(title, ""),
+                    })
+                offset += len(postings)
+                if not postings or offset >= int(data.get("totalFound") or 0):
+                    break
+        except Exception as e:
+            print(f"[smartrecruiters:{company}] {e}")
+    return out
+
 def fetch_workday():
     out = []
     for name, host, tenant, site in WORKDAY_COMPANIES:
@@ -1398,9 +1497,11 @@ def fetch_linkedin():
             print(f"[linkedin] {e}")
     return out
 
-def fetch_indeed():
+def fetch_indeed_rss():
+    """Legacy fallback used only when python-jobspy is unavailable."""
     out = []
-    for kw, loc in INDEED_QUERIES:
+    for kw in JOB_BOARD_QUERIES:
+        loc = JOB_BOARD_LOCATION
         try:
             url = (
                 "https://ca.indeed.com/rss"
@@ -1436,6 +1537,88 @@ def fetch_indeed():
         except Exception as e:
             print(f"[indeed] {e}")
     return out
+
+def clean_tabular_value(value, default=""):
+    """Turn pandas/NumPy missing values into ordinary Python values."""
+    if value is None:
+        return default
+    try:
+        if value != value:  # NaN / NaT
+            return default
+    except (TypeError, ValueError):
+        pass
+    return value
+
+def tabular_date_ts(value):
+    value = clean_tabular_value(value, None)
+    if value is None:
+        return None
+    if hasattr(value, "timestamp"):
+        try:
+            return int(value.timestamp())
+        except (TypeError, ValueError, OSError):
+            pass
+    return parse_iso(str(value))
+
+def fetch_jobspy_board(site):
+    """Fetch one current job board through JobSpy and normalize its rows."""
+    try:
+        from jobspy import scrape_jobs
+    except ImportError as e:
+        print(f"[{site}] python-jobspy unavailable: {e}")
+        return fetch_indeed_rss() if site == "indeed" else []
+
+    out = []
+    for query in JOB_BOARD_QUERIES:
+        try:
+            frame = scrape_jobs(
+                site_name=[site],
+                search_term=query,
+                location=JOB_BOARD_LOCATION,
+                country_indeed="Canada",
+                results_wanted=JOB_BOARD_RESULTS_PER_QUERY,
+                hours_old=max(24, ALERT_WINDOW_MINUTES // 60),
+                description_format="html",
+                proxies=JOBSPY_PROXIES or None,
+                user_agent=HEADERS["User-Agent"],
+                verbose=0,
+            )
+            records = frame.to_dict("records") if hasattr(frame, "to_dict") else []
+            print(f"[{site}:{query}] {len(records)} raw results")
+            for row in records:
+                city = clean_tabular_value(row.get("city"))
+                state = clean_tabular_value(row.get("state"))
+                country = clean_tabular_value(row.get("country"))
+                loc = ", ".join(str(x) for x in (city, state, country) if x)
+                if clean_tabular_value(row.get("is_remote"), False) and not loc:
+                    loc = "Remote - Canada"
+                title = str(clean_tabular_value(row.get("title")))
+                company = str(clean_tabular_value(row.get("company")))
+                desc = str(clean_tabular_value(row.get("description")))
+                employees = clean_tabular_value(row.get("company_num_employees"))
+                if not employees:
+                    employees = clean_tabular_value(row.get("company_employees_label"))
+                out.append({
+                    "title": title,
+                    "company": company,
+                    "location": loc,
+                    "url": str(clean_tabular_value(row.get("job_url"))),
+                    "direct_url": str(clean_tabular_value(row.get("job_url_direct"))),
+                    "description": desc,
+                    "posted_ts": tabular_date_ts(row.get("date_posted")),
+                    "company_size": str(employees or ""),
+                    "reject_reason": reject_reason(title, desc, loc),
+                    "note": match_note(title, desc),
+                })
+        except Exception as e:
+            print(f"[{site}:{query}] scrape failed: {type(e).__name__}: {e}")
+    return out
+
+def fetch_indeed():
+    return fetch_jobspy_board("indeed")
+
+def fetch_glassdoor():
+    return fetch_jobspy_board("glassdoor")
 
 def fetch_community():
     """Read Simplify / Vansh listings.json directly. This is the big multiplier:
@@ -1544,6 +1727,14 @@ def format_block(j):
     bits = []
     if company:
         bits.append(company)
+    source = j.get("source", "")
+    if source:
+        bits.append({
+            "generic_careers": "company site",
+            "community": "company application",
+        }.get(source, source.replace("_", " ").title()))
+    if j.get("company_size"):
+        bits.append(f"company size {j['company_size']}")
     if j.get("location"):
         bits.append(j["location"])
     if j.get("time_label"):
@@ -1560,6 +1751,9 @@ def format_block(j):
     lines = [line1]
     if line2:
         lines.append(line2)
+    direct_url = j.get("direct_url", "")
+    if direct_url and direct_url != url:
+        lines.append(f"[Company application]({direct_url})")
     if j.get("matched_skills"):
         lines.append("Matched: " + ", ".join(j["matched_skills"][:6]))
     if j.get("missing_skills"):
@@ -1611,6 +1805,57 @@ def digest_blocks(jobs):
     )
     return [format_block(j) for j in jobs]
 
+# Lower is better. Employer-hosted ATS links win over community feeds, and
+# LinkedIn is only retained when no direct/company-board version was found.
+SOURCE_PRIORITY = {
+    "greenhouse": 0, "lever": 0, "ashby": 0, "workday": 0,
+    "smartrecruiters": 0, "bamboohr": 0, "generic_careers": 0,
+    "community": 1, "indeed": 3, "linkedin": 10,
+}
+
+ALERT_SOURCE_PRIORITY = {
+    "indeed": 0, "glassdoor": 1,
+    "greenhouse": 2, "lever": 2, "ashby": 2, "workday": 2,
+    "smartrecruiters": 2, "bamboohr": 2, "generic_careers": 2,
+    "community": 3, "linkedin": 10,
+}
+
+def source_priority(job):
+    return SOURCE_PRIORITY.get(job.get("source", ""), 5)
+
+def employer_size_priority(job):
+    """Small known employers first, unknown next, major employers last."""
+    size = str(job.get("company_size") or "")
+    numbers = [int(n.replace(",", "")) for n in re.findall(r"[\d,]+", size)]
+    if numbers:
+        return 0 if max(numbers) <= 500 else 2
+    return 2 if london_large_company(job.get("company", "")) else 1
+
+def alert_sort_key(job):
+    return (
+        ALERT_SOURCE_PRIORITY.get(job.get("source", ""), 5),
+        employer_size_priority(job),
+        -(job.get("posted_ts") or 0),
+    )
+
+def prefer_best_source(jobs):
+    """Collapse cross-source copies and retain the most direct application."""
+    best = {}
+    for job in jobs:
+        key = role_key(job)
+        current = best.get(key)
+        candidate_rank = (
+            bool(job.get("reject_reason")), source_priority(job),
+            -(job.get("posted_ts") or 0),
+        )
+        current_rank = (
+            bool(current.get("reject_reason")), source_priority(current),
+            -(current.get("posted_ts") or 0),
+        ) if current else None
+        if current is None or candidate_rank < current_rank:
+            best[key] = job
+    return list(best.values())
+
 def send(jobs, header=None):
     if header is None:
         header = alert_header(len(jobs))
@@ -1627,8 +1872,9 @@ def send(jobs, header=None):
         else:
             print(header)
         return
-    # Newest first; unknown-time jobs go last.
-    jobs = sorted(jobs, key=lambda j: j.get("posted_ts") or 0, reverse=True)
+    # Indeed first, then Glassdoor/company sources; smaller employers lead each
+    # group and freshness breaks ties.
+    jobs = sorted(jobs, key=alert_sort_key)
     blocks = [format_block(j) for j in jobs]
 
     if NOTIFY == "discord":
@@ -1649,8 +1895,11 @@ def collect_all_jobs():
     resume_skills = load_resume_skills()
     fetchers = [
         fetch_bamboohr, fetch_generic_careers, fetch_greenhouse, fetch_lever,
-        fetch_ashby, fetch_workday, fetch_community, fetch_indeed,
+        fetch_ashby, fetch_smartrecruiters, fetch_workday, fetch_community,
+        fetch_indeed,
     ]
+    if ENABLE_GLASSDOOR:
+        fetchers.append(fetch_glassdoor)
     if ENABLE_LINKEDIN:
         fetchers.append(fetch_linkedin)
     for fn in fetchers:
@@ -1691,14 +1940,15 @@ def collect_all_jobs():
 def run_alert():
     """Notify verified jobs originally posted within the configured window."""
     con = db_init()
-    all_jobs = collect_all_jobs()
+    fetched_jobs = collect_all_jobs()
+    all_jobs = prefer_best_source(fetched_jobs)
     now = time.time()
     cutoff = now - ALERT_WINDOW_MINUTES * 60
 
     new_jobs = []
     source_stats = {}
     stats = {
-        "fetched": len(all_jobs),
+        "fetched": len(fetched_jobs),
         "no_time": 0,
         "outside_window": 0,
         "in_window": 0,
@@ -1722,6 +1972,7 @@ def run_alert():
                 add_example(stats, reason, j)
             continue
         uid = make_uid(j["company"], j["title"], j["url"])
+        semantic_uid = role_key(j)
         ts = j.get("posted_ts")
         if not ts:
             stats["no_time"] += 1
@@ -1736,15 +1987,17 @@ def run_alert():
         stats["in_window"] += 1
         increment_source(j, "eligible")
         # Backstop: skip anything we've already notified about.
-        if not is_new(con, uid):
+        if not is_new(con, uid) or recently_notified(con, semantic_uid, now):
             stats["duplicate"] += 1
             increment_source(j, "duplicate")
             continue
         new_jobs.append(j)
         increment_source(j, "new")
         mark_seen(con, uid)
+        mark_role_notified(con, semantic_uid, j, now)
 
-    print(f"Fetched {len(all_jobs)} jobs, {stats['in_window']} eligible, "
+    print(f"Fetched {len(fetched_jobs)} jobs, {len(all_jobs)} unique roles, "
+          f"{stats['in_window']} eligible, "
           f"{stats['duplicate']} duplicates, {len(new_jobs)} new to notify")
     for source, counters in source_stats.items():
         print(
@@ -1761,7 +2014,7 @@ def run_alert():
 def run_digest():
     """Daily mode (~midnight): summarize everything posted in the last
     DIGEST_LOOKBACK_HOURS, regardless of prior alerts. Does NOT touch the DB."""
-    all_jobs = collect_all_jobs()
+    all_jobs = prefer_best_source(collect_all_jobs())
     cutoff = time.time() - DIGEST_LOOKBACK_HOURS * 3600
     # dedup within this run by uid (same posting from two sources)
     seen, todays = set(), []
@@ -1771,7 +2024,7 @@ def run_digest():
         ts = j.get("posted_ts")
         if not ts or ts < cutoff:
             continue
-        uid = make_uid(j["company"], j["title"], j["url"])
+        uid = role_key(j)
         if uid in seen:
             continue
         seen.add(uid)

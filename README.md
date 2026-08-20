@@ -2,7 +2,7 @@
 
 After setup, your computer can be turned off. GitHub Actions will run the watcher on GitHub's servers.
 
-- **Regular alerts, every 30 minutes**: opens each potentially relevant job page, verifies the full description and original posting time, and keeps only roles first posted within the last 24 hours. Deduplication prevents repeat alerts.
+- **Regular alerts, every 30 minutes**: opens each potentially relevant job page, verifies the full description and original posting time, and keeps only roles first posted within the last 24 hours. The same company/title is suppressed for 7 days even if it is reposted under a new URL or requisition ID.
 - **Daily digest, around midnight to 1 AM Eastern time**: sends a 24-hour summary of all matching jobs from the day, grouped in a cleaner format for review.
 
 Messages include posting time or age when available, with the newest jobs first. Each posting is separated clearly, and links are left as plain URLs so Discord can show its own preview card when available.
@@ -24,7 +24,9 @@ Current filtering rules:
 - Senior, staff, principal, lead, manager, director, architect, executive, VP, and similar senior-level roles are skipped.
 - PhD / doctorate-only roles are skipped.
 - Jobs with hard requirements for clearly unrelated majors, such as accounting, nursing, mechanical engineering, civil engineering, or chemical engineering, are skipped.
-- Sources include company career pages and official ATS boards (Greenhouse, Lever, Ashby, Workday, and BambooHR), plus Indeed, LinkedIn, and the new-grad community feed. The expanded direct-company list is intended to provide a healthier mix instead of relying mostly on LinkedIn.
+- Sources include company career pages and official ATS boards (Greenhouse, Lever, Ashby, Workday, SmartRecruiters, and BambooHR), plus Indeed, Glassdoor, LinkedIn, and the new-grad community feed. Indeed uses JobSpy's current GraphQL-backed collector rather than the obsolete RSS-only path. Alerts show Indeed results first, then Glassdoor and company sources; known small employers are placed before major employers within each group. When the same role appears on multiple sources, the official company/ATS application is selected; LinkedIn is the lowest-priority fallback.
+
+Indeed and Glassdoor can block shared GitHub Actions IP addresses. Indeed is generally the more reliable of the two. If run logs show repeated `403`/blocked errors, add an optional repository secret named `JOBSPY_PROXIES` containing a comma-separated proxy list accepted by JobSpy. Source names and company-size labels are included in alerts so source coverage is visible instead of failing silently.
 
 Precision note:
 
