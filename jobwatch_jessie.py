@@ -67,6 +67,7 @@ watcher.GREENHOUSE_COMPANIES = []
 watcher.LEVER_COMPANIES = ["deepgenomics"]
 watcher.ASHBY_COMPANIES = []
 watcher.WORKDAY_COMPANIES = []
+watcher.SMARTRECRUITERS_COMPANIES = []
 watcher.CAREER_DETAIL_PAGE_LIMIT = 15
 watcher.GENERIC_CAREER_SITES = [
     ("Pfizer Canada", "https://www.pfizer.com/about/careers"),
@@ -153,7 +154,12 @@ watcher.LINKEDIN_QUERIES = [
     ALL_SEARCH_QUERIES[(batch_start + offset) % len(ALL_SEARCH_QUERIES)]
     for offset in range(QUERY_BATCH_SIZE)
 ]
-watcher.INDEED_QUERIES = list(watcher.LINKEDIN_QUERIES)
+# The shared collector now uses JobSpy for current Indeed/Glassdoor results.
+# Keep Jessie's rotating biotech/life-science queries and GTA-only location.
+watcher.JOB_BOARD_QUERIES = [query for query, _ in watcher.LINKEDIN_QUERIES]
+watcher.JOB_BOARD_LOCATION = "Toronto, ON"
+watcher.JOB_BOARD_RESULTS_PER_QUERY = 60
+watcher.ENABLE_GLASSDOOR = True
 print(
     f"[search-rotation] running {QUERY_BATCH_SIZE}/{len(ALL_SEARCH_QUERIES)} "
     f"queries this half-hour (batch starts at {batch_start})"
@@ -282,6 +288,9 @@ def make_uid(company, title, url=""):
 watcher.match_reject_reason = match_reject_reason
 watcher.match_note = match_note
 watcher.make_uid = make_uid
+watcher.role_key = lambda job: make_uid(
+    job.get("company", ""), job.get("title", "")
+)
 # Ivy's committed skill profile belongs only to the owner watcher. Jessie gets
 # the shared full-JD, freshness, repost, applicant and salary validation, but no
 # resume score unless a separate Jessie profile is explicitly added later.

@@ -123,7 +123,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 lxml
+        run: pip install -r requirements.txt
 
       - name: Determine mode
         id: mode
@@ -157,6 +157,7 @@ jobs:
         env:
           JESSIE_DISCORD_WEBHOOK: ${{ secrets.JESSIE_DISCORD_WEBHOOK }}
           JESSIE_JOBWATCH_DB: jessie_seen_jobs.db
+          JOBSPY_PROXIES: ${{ secrets.JOBSPY_PROXIES }}
           JOBWATCH_MODE: ${{ steps.mode.outputs.mode }}
         run: python jobwatch_jessie.py
 
