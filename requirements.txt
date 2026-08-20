@@ -3,3 +3,4 @@ beautifulsoup4
 lxml
 pypdf
 python-docx
+python-jobspy==1.1.82

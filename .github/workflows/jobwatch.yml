@@ -67,6 +67,7 @@ jobs:
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           JOBWATCH_RESUME_SKILLS: ${{ secrets.JOBWATCH_RESUME_SKILLS }}
+          JOBSPY_PROXIES: ${{ secrets.JOBSPY_PROXIES }}
           JOBWATCH_DB: seen_jobs.db
           JOBWATCH_MODE: ${{ steps.mode.outputs.mode }}
         run: python jobwatch.py
